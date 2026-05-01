@@ -1,0 +1,26 @@
+{
+  "name": "Nomis — AI by NoteShelf",
+  "short_name": "Nomis",
+  "description": "Nomis is a luxury AI assistant by NoteShelf, powered by Claude.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#07060A",
+  "theme_color": "#07060A",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "https://iili.io/qIqJ2F2.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "https://iili.io/qIqJ2F2.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["productivity", "utilities"],
+  "screenshots": []
+}
