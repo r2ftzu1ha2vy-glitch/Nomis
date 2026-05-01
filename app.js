@@ -121,6 +121,8 @@ function friendlyError(code) {
     'auth/invalid-credential': 'Incorrect email or password.',
     'auth/too-many-requests': 'Too many attempts. Please try again later.',
     'auth/network-request-failed': 'Network error. Check your connection.',
+    'auth/operation-not-allowed': 'Email/password sign-in is not enabled. Check Firebase Console.',
+    'auth/internal-error': 'An internal error occurred. Please try again.',
   };
   return map[code] || 'Something went wrong. Please try again.';
 }
