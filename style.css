@@ -540,3 +540,54 @@ body.nodex-mode #input-mode-hint { color:#00C896; }
   #download-app-card { flex-direction:column; text-align:center; }
   #download-app-icon { align-self:center; }
 }
+/* ── Noteshelf CTA Button ── */
+#noteshelf-btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 10px 6px 6px;
+  border-radius: 20px;
+  border: 1px solid rgba(184,150,12,0.35);
+  background: rgba(255,215,0,0.04);
+  color: var(--gold-dim);
+  text-decoration: none;
+  font-family: 'Cinzel', serif;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: all 0.22s ease;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+#noteshelf-btn img {
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  object-fit: cover;
+  border: 1px solid rgba(184,150,12,0.3);
+  flex-shrink: 0;
+}
+
+#noteshelf-btn span {
+  overflow: hidden;
+  max-width: 70px;
+  transition: max-width 0.3s ease, opacity 0.2s ease;
+}
+
+#noteshelf-btn:hover {
+  background: linear-gradient(135deg, rgba(255,215,0,0.15), rgba(184,150,12,0.08));
+  border-color: rgba(184,150,12,0.6);
+  color: var(--gold);
+  box-shadow: 0 0 16px rgba(255,215,0,0.12);
+  transform: translateY(-1px);
+}
+
+/* When sidebar is collapsed, hide the label but keep the icon */
+#sidebar.collapsed #noteshelf-btn span {
+  max-width: 0;
+  opacity: 0;
+}
