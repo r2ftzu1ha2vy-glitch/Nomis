@@ -43,6 +43,31 @@ const firebaseApp = initializeApp(firebaseConfig);
 const auth = getAuth(firebaseApp);
 const db = getDatabase(firebaseApp);
 
+/* ── Owner email ── */
+const OWNER_EMAIL = 'r2ftzu1ha2vy@gmail.com';
+
+/* ── Check maintenance mode before showing app ── */
+async function checkMaintenanceMode(userEmail) {
+  try {
+    const snap = await get(ref(db, 'settings/maintenance'));
+    const isDown = snap.exists() ? snap.val() : false;
+    if (isDown && userEmail !== OWNER_EMAIL) {
+      showMaintenanceScreen();
+      return true; // blocked
+    }
+  } catch (e) {
+    console.warn('Could not read maintenance mode:', e);
+  }
+  return false; // all clear
+}
+
+function showMaintenanceScreen() {
+  authScreen.style.display = 'none';
+  appEl.style.display = 'none';
+  const el = $('maintenance-screen');
+  if (el) el.style.display = 'flex';
+}
+
 /* ── System prompts ── */
 const SYSTEM_NOMIS = `You are Nomis — an intelligent, eloquent AI assistant created by NoteShelf. You have a refined, sophisticated personality. You are thoughtful, articulate, and helpful. You speak with clarity and elegance, never verbose for the sake of it. You can assist with any topic: writing, analysis, research, creative work, planning, and more. Format your responses with markdown when it aids readability.
 
@@ -302,14 +327,68 @@ signupBtn.addEventListener('click', async () => {
 /* ══════════════════════════════════
    START APP
 ══════════════════════════════════ */
-function startApp(user) {
+async function startApp(user) {
   state.user = user;
+  const blocked = await checkMaintenanceMode(user.email);
+  if (blocked) return;
+
   authScreen.style.display = 'none';
   appEl.style.display = 'flex';
   refreshUserUI();
   renderHistory();
   newChat();
   updateTimeGreeting();
+  if (user.email === OWNER_EMAIL) renderOwnerToggle();
+}
+
+function renderOwnerToggle() {
+  // Don't add twice
+  if ($('maintenance-toggle-wrap')) return;
+
+  const wrap = document.createElement('div');
+  wrap.id = 'maintenance-toggle-wrap';
+  wrap.title = 'Toggle maintenance mode';
+  wrap.innerHTML = `
+    <span id="maintenance-toggle-label">Nomis: Online</span>
+    <button id="maintenance-toggle-btn" class="maintenance-btn online">
+      <span class="toggle-dot"></span>
+    </button>
+  `;
+
+  // Insert into sidebar bottom, before user-info
+  const sidebarBottom = $('sidebar-bottom');
+  const userInfo = $('user-info');
+  sidebarBottom.insertBefore(wrap, userInfo);
+
+  // Load current state
+  get(ref(db, 'settings/maintenance')).then(snap => {
+    const isDown = snap.exists() ? snap.val() : false;
+    setToggleState(isDown);
+  });
+
+  $('maintenance-toggle-btn').addEventListener('click', async () => {
+    const snap = await get(ref(db, 'settings/maintenance'));
+    const current = snap.exists() ? snap.val() : false;
+    const next = !current;
+    await set(ref(db, 'settings/maintenance'), next);
+    setToggleState(next);
+    showToast(next ? 'Nomis is now offline for users.' : 'Nomis is back online.');
+  });
+}
+
+function setToggleState(isDown) {
+  const btn = $('maintenance-toggle-btn');
+  const label = $('maintenance-toggle-label');
+  if (!btn || !label) return;
+  if (isDown) {
+    btn.classList.remove('online');
+    btn.classList.add('offline');
+    label.textContent = 'Nomis: Offline';
+  } else {
+    btn.classList.remove('offline');
+    btn.classList.add('online');
+    label.textContent = 'Nomis: Online';
+  }
 }
 
 function refreshUserUI() {
