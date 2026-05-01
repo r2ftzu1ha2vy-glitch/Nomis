@@ -199,8 +199,30 @@ body.nodex-mode .mode-btn.active[data-mode="nodex"] { background:rgba(0,200,150,
 #user-info:hover #edit-profile-icon { opacity:1; }
 #edit-profile-icon:hover { border-color:var(--gold-dim); color:var(--gold); background:var(--gold-muted); }
 
-#logout-btn { width:32px; height:32px; border-radius:50%; border:1px solid var(--ink-border); background:transparent; color:var(--gold-dim); cursor:pointer; display:flex; align-items:center; justify-content:center; transition:all 0.2s; flex-shrink:0; }
-#logout-btn:hover { border-color:var(--red); color:var(--red); background:rgba(255,107,107,0.06); }
+#logout-btn {
+  flex: 1;
+  height: 36px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--ink-border);
+  background: transparent;
+  color: var(--gold-dim);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  font-family: 'Cinzel', serif;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  transition: all 0.2s;
+}
+#logout-btn:hover {
+  border-color: var(--red);
+  color: var(--red);
+  background: rgba(255,107,107,0.06);
+}
 
 /* ════════════════════════════════════════
    CHAT AREA
