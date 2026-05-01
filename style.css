@@ -591,3 +591,97 @@ body.nodex-mode #input-mode-hint { color:#00C896; }
   max-width: 0;
   opacity: 0;
 }
+/* ════════════════════════════════════════
+   MAINTENANCE SCREEN
+════════════════════════════════════════ */
+#maintenance-screen {
+  position: fixed; inset: 0;
+  background: var(--obsidian);
+  background-image: radial-gradient(ellipse 80% 60% at 50% -10%, rgba(255,215,0,0.07) 0%, transparent 70%);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 99999; flex-direction: column;
+}
+#maintenance-orb {
+  position: absolute; width: 600px; height: 600px;
+  border-radius: 50%; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  background: radial-gradient(circle, rgba(255,215,0,0.05) 0%, transparent 70%);
+  filter: blur(60px); pointer-events: none;
+  animation: orbFloat1 10s ease-in-out infinite;
+}
+#maintenance-content {
+  display: flex; flex-direction: column; align-items: center;
+  gap: 18px; text-align: center; padding: 40px;
+}
+#maintenance-logo {
+  width: 90px; height: 90px; border-radius: 24px;
+  border: 1px solid rgba(184,150,12,0.5);
+  box-shadow: 0 0 50px rgba(255,215,0,0.2);
+  object-fit: cover;
+  animation: logoPulse 4s ease-in-out infinite;
+}
+#maintenance-title {
+  font-family: 'Cinzel Decorative', serif; font-size: 32px;
+  font-weight: 900; color: var(--gold); letter-spacing: 4px;
+  text-shadow: 0 0 40px var(--gold-glow);
+}
+#maintenance-sub {
+  font-family: 'EB Garamond', serif; font-size: 18px;
+  color: var(--gold-dim); max-width: 380px; line-height: 1.7; opacity: 0.8;
+}
+#maintenance-dots {
+  display: flex; gap: 8px; align-items: center; margin-top: 8px;
+}
+#maintenance-dots span {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--gold-dim);
+  animation: dotBounce 1.3s ease infinite;
+}
+#maintenance-dots span:nth-child(2) { animation-delay: 0.2s; }
+#maintenance-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+/* ════════════════════════════════════════
+   OWNER MAINTENANCE TOGGLE
+════════════════════════════════════════ */
+#maintenance-toggle-wrap {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 8px; border-radius: var(--r-md);
+  border: 1px solid var(--ink-border);
+  background: rgba(255,215,0,0.03);
+  flex-shrink: 0;
+}
+#maintenance-toggle-label {
+  font-family: 'Cinzel', serif; font-size: 8px;
+  letter-spacing: 1px; text-transform: uppercase;
+  color: var(--gold-dim); white-space: nowrap;
+}
+#maintenance-toggle-btn {
+  width: 34px; height: 18px; border-radius: 10px;
+  border: 1px solid var(--ink-border);
+  background: var(--ink); cursor: pointer;
+  position: relative; transition: all 0.25s ease;
+  flex-shrink: 0; padding: 0;
+}
+#maintenance-toggle-btn .toggle-dot {
+  position: absolute; top: 2px; left: 2px;
+  width: 12px; height: 12px; border-radius: 50%;
+  background: var(--gold-dim);
+  transition: all 0.25s ease;
+}
+#maintenance-toggle-btn.online {
+  border-color: rgba(46,204,113,0.5);
+  background: rgba(46,204,113,0.1);
+}
+#maintenance-toggle-btn.online .toggle-dot {
+  background: #2ecc71;
+  left: 18px;
+  box-shadow: 0 0 8px rgba(46,204,113,0.6);
+}
+#maintenance-toggle-btn.offline {
+  border-color: rgba(255,107,107,0.5);
+  background: rgba(255,107,107,0.08);
+}
+#maintenance-toggle-btn.offline .toggle-dot {
+  background: var(--red);
+  left: 2px;
+  box-shadow: 0 0 8px rgba(255,107,107,0.5);
+}
