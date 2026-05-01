@@ -514,6 +514,42 @@ document.querySelectorAll('.chip').forEach(chip => {
 });
 
 /* ══════════════════════════════════
+   AI CHAT TITLE GENERATOR
+══════════════════════════════════ */
+async function generateChatTitle(chatId, firstMessage) {
+  try {
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+        'HTTP-Referer': APP_URL,
+        'X-Title': 'Nomis AI',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        max_tokens: 16,
+        temperature: 0.4,
+        messages: [
+          {
+            role: 'user',
+            content: `Generate a short, punchy title (3–5 words max, no quotes, no punctuation at the end) that captures the topic of this message:\n\n"${firstMessage}"`
+          }
+        ]
+      })
+    });
+    if (!response.ok) return;
+    const data = await response.json();
+    const raw = data.choices?.[0]?.message?.content || '';
+    const title = raw.trim().replace(/^["']|["']$/g, '').trim();
+    if (title) {
+      Store.updateChat(chatId, { title });
+      renderHistory();
+    }
+  } catch { /* silently fail — title stays as … */ }
+}
+
+/* ══════════════════════════════════
    SEND MESSAGE
 ══════════════════════════════════ */
 async function sendMessage() {
@@ -535,15 +571,16 @@ async function sendMessage() {
 
   const isFirstMessage = Store.get().find(c => c.id === state.activeChatId) == null;
   if (isFirstMessage) {
-    const title = text.length > 50 ? text.slice(0, 50) + '…' : text;
     Store.addChat({
       id: state.activeChatId,
-      title,
+      title: '…',
       mode: state.mode,
       messages: state.messages,
       createdAt: Date.now()
     });
     renderHistory();
+    // Fire-and-forget: generate a smart title after the first message
+    generateChatTitle(state.activeChatId, text);
   }
 
   const thinkingRow = thinkingTpl.content.cloneNode(true).querySelector('.thinking-row');
