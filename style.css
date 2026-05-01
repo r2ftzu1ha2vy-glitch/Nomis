@@ -161,7 +161,18 @@ body.nodex-mode .mode-btn.active[data-mode="nodex"] { background:rgba(0,200,150,
 .history-del-btn svg { pointer-events:none; }
 
 /* ── Sidebar Bottom ── */
-#sidebar-bottom { padding:12px; border-top:1px solid var(--ink-border); display:flex; align-items:center; gap:8px; }
+#sidebar-bottom {
+  padding: 12px;
+  border-top: 1px solid var(--ink-border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+#sidebar-bottom-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 
 /* Download button in sidebar */
 #download-nomis-btn {
