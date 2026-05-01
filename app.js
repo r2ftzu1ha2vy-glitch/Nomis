@@ -39,6 +39,7 @@ const OWNER_EMAIL = 'r2ftzu1ha2vy@gmail.com';
 /* ════════════════════════════════════════
    MAINTENANCE MODE
 ════════════════════════════════════════ */
+// WITH THIS:
 async function checkMaintenanceMode(userEmail) {
   try {
     const snap = await get(ref(db, 'settings/maintenance'));
@@ -46,6 +47,33 @@ async function checkMaintenanceMode(userEmail) {
     if (isDown && userEmail !== OWNER_EMAIL) { showMaintenanceScreen(); return true; }
   } catch (e) { console.warn('Could not read maintenance mode:', e); }
   return false;
+}
+
+async function fetchNomisStatus() {
+  try {
+    const snap = await get(ref(db, 'settings/status'));
+    if (snap.exists()) return snap.val();
+  } catch (e) { console.warn('Could not read Nomis status:', e); }
+  return null;
+}
+
+function buildStatusContext(status) {
+  if (!status) return '';
+  const lines = [];
+  lines.push('\n\n--- NOMIS SELF-AWARENESS: CURRENT STATUS ---');
+  lines.push(`You are currently: ${status.maintenance ? 'OFFLINE (maintenance mode)' : 'ONLINE and operational'}.`);
+  if (status.version) lines.push(`Your current version is: ${status.version}.`);
+  if (status.message) lines.push(`Status message from your creators: "${status.message}"`);
+  if (status.changelog && status.changelog.length) {
+    lines.push('Recent improvements and fixes (most recent first):');
+    status.changelog.slice(0, 8).forEach((entry, i) => {
+      lines.push(`  ${i + 1}. [${entry.date || 'Recently'}] ${entry.note}`);
+    });
+    lines.push('When asked what is new, what changed, or if you got any updates, share these naturally and with pride.');
+  }
+  lines.push('If asked whether you are down, fixed, improved, or updated — answer accurately using the above information.');
+  lines.push('--- END STATUS ---');
+  return lines.join('\n');
 }
 
 function showMaintenanceScreen() {
@@ -185,15 +213,16 @@ const PersonaStore = {
 ════════════════════════════════════════ */
 let state = {
   user: null,
-  mode: 'nomis',           // 'nomis' | 'nodex' | 'persona'
+  mode: 'nomis',
   activeChatId: null,
   messages: [],
   isStreaming: false,
   sidebarOpen: true,
   personas: [],
-  activePersona: null,     // persona object or null
-  pendingImage: null,      // { base64, mimeType, previewUrl }
+  activePersona: null,
+  pendingImage: null,
   isListening: false,
+  nomisStatusContext: '',   // ← ADD THIS LINE
 };
 
 /* ════════════════════════════════════════
@@ -305,6 +334,11 @@ async function startApp(user) {
   state.user = user;
   const blocked = await checkMaintenanceMode(user.email);
   if (blocked) { authScreen.style.display = 'none'; return; }
+
+  // Load Nomis status for self-awareness
+  const nomisStatus = await fetchNomisStatus();
+  state.nomisStatusContext = buildStatusContext(nomisStatus);
+
   authScreen.style.display = 'none';
   appEl.style.display = 'flex';
   refreshUserUI();
@@ -320,18 +354,119 @@ function renderOwnerToggle() {
   const wrap = document.createElement('div');
   wrap.id = 'maintenance-toggle-wrap';
   wrap.title = 'Toggle maintenance mode';
-  wrap.innerHTML = `<span id="maintenance-toggle-label">Nomis: Online</span>
-    <button id="maintenance-toggle-btn" class="maintenance-btn online"><span class="toggle-dot"></span></button>`;
+  wrap.innerHTML = `
+    <span id="maintenance-toggle-label">Nomis: Online</span>
+    <button id="maintenance-toggle-btn" class="maintenance-btn online"><span class="toggle-dot"></span></button>
+    <button id="status-edit-btn" title="Edit status & changelog" style="
+      width:22px;height:22px;border-radius:50%;border:1px solid rgba(184,150,12,0.3);
+      background:transparent;color:var(--gold-dim);cursor:pointer;
+      display:flex;align-items:center;justify-content:center;font-size:12px;
+      transition:all 0.2s;flex-shrink:0;
+    ">✎</button>`;
   const sidebarBottom = $('sidebar-bottom');
   const userInfo = $('user-info');
   sidebarBottom.insertBefore(wrap, userInfo);
+
   get(ref(db, 'settings/maintenance')).then(snap => setToggleState(snap.exists() ? snap.val() : false));
+
   $('maintenance-toggle-btn').addEventListener('click', async () => {
     const snap = await get(ref(db, 'settings/maintenance'));
     const next = !(snap.exists() ? snap.val() : false);
     await set(ref(db, 'settings/maintenance'), next);
+    // also update status object
+    await update(ref(db, 'settings/status'), { maintenance: next });
+    state.nomisStatusContext = buildStatusContext(await fetchNomisStatus());
     setToggleState(next);
     showToast(next ? 'Nomis is now offline for users.' : 'Nomis is back online.');
+  });
+
+  $('status-edit-btn').addEventListener('click', openStatusEditor);
+}
+
+function openStatusEditor() {
+  // Remove existing editor if open
+  const existing = $('status-editor-overlay');
+  if (existing) { existing.remove(); return; }
+
+  const overlay = document.createElement('div');
+  overlay.id = 'status-editor-overlay';
+  overlay.style.cssText = `
+    position:fixed;inset:0;background:rgba(5,4,10,0.85);backdrop-filter:blur(8px);
+    z-index:20000;display:flex;align-items:center;justify-content:center;
+    animation:authIn 0.25s ease forwards;
+  `;
+
+  overlay.innerHTML = `
+    <div style="
+      width:min(500px,calc(100vw - 32px));max-height:90vh;overflow-y:auto;
+      background:linear-gradient(160deg,var(--ink-mid),var(--ink));
+      border:1px solid rgba(184,150,12,0.45);border-radius:20px;
+      box-shadow:0 40px 100px rgba(0,0,0,0.9);padding:28px;
+      display:flex;flex-direction:column;gap:18px;
+    ">
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <span style="font-family:'Cinzel',serif;font-size:12px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--gold);">✦ Nomis Status Editor</span>
+        <button id="status-editor-close" style="width:28px;height:28px;border-radius:50%;border:1px solid var(--ink-border);background:transparent;color:var(--gold-dim);cursor:pointer;font-size:16px;">×</button>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:6px;">
+        <label style="font-family:'Cinzel',serif;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--gold-dim);">Version</label>
+        <input id="se-version" type="text" placeholder="e.g. 2.1.0" style="padding:10px 14px;background:var(--ink);border:1px solid var(--ink-border);border-radius:8px;color:var(--cream);font-family:'EB Garamond',serif;font-size:15px;outline:none;" />
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:6px;">
+        <label style="font-family:'Cinzel',serif;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--gold-dim);">Status Message (what Nomis will tell users)</label>
+        <textarea id="se-message" rows="2" placeholder="e.g. I've just been updated with improved reasoning and faster responses." style="padding:10px 14px;background:var(--ink);border:1px solid var(--ink-border);border-radius:8px;color:var(--cream);font-family:'EB Garamond',serif;font-size:15px;outline:none;resize:vertical;"></textarea>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        <label style="font-family:'Cinzel',serif;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--gold-dim);">Changelog (one entry per line — Nomis will share these when asked what's new)</label>
+        <textarea id="se-changelog" rows="7" placeholder="Fixed image upload handling&#10;Improved streaming speed&#10;Added voice input on mobile&#10;Better code formatting in Nodex mode" style="padding:10px 14px;background:var(--ink);border:1px solid var(--ink-border);border-radius:8px;color:var(--cream);font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.6;outline:none;resize:vertical;"></textarea>
+        <span style="font-family:'Cinzel',serif;font-size:9px;color:var(--gold-dim);opacity:0.5;">Each line becomes a changelog entry. Most recent changes go at the top.</span>
+      </div>
+
+      <button id="se-save-btn" style="
+        padding:13px;font-family:'Cinzel',serif;font-size:11px;font-weight:700;
+        letter-spacing:3px;text-transform:uppercase;border-radius:30px;border:none;
+        background:linear-gradient(135deg,var(--gold),#D4A017);color:var(--obsidian);
+        cursor:pointer;transition:all 0.25s;
+      ">Save Status & Changelog</button>
+    </div>`;
+
+  document.body.appendChild(overlay);
+
+  // Load existing status
+  fetchNomisStatus().then(status => {
+    if (!status) return;
+    if (status.version)   $('se-version').value = status.version;
+    if (status.message)   $('se-message').value = status.message;
+    if (status.changelog) $('se-changelog').value = status.changelog.map(e => e.note).join('\n');
+  });
+
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  $('status-editor-close').addEventListener('click', () => overlay.remove());
+
+  $('se-save-btn').addEventListener('click', async () => {
+    const version   = $('se-version').value.trim();
+    const message   = $('se-message').value.trim();
+    const rawLines  = $('se-changelog').value.split('\n').map(l => l.trim()).filter(Boolean);
+    const today     = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    const changelog = rawLines.map(note => ({ note, date: today }));
+
+    const snap = await get(ref(db, 'settings/maintenance'));
+    const isDown = snap.exists() ? snap.val() : false;
+
+    await set(ref(db, 'settings/status'), {
+      maintenance: isDown,
+      version:     version || null,
+      message:     message || null,
+      changelog:   changelog.length ? changelog : null,
+      updatedAt:   Date.now()
+    });
+
+    state.nomisStatusContext = buildStatusContext(await fetchNomisStatus());
+    overlay.remove();
+    showToast('Nomis status updated — she knows who she is now ✦');
   });
 }
 
@@ -908,9 +1043,9 @@ async function sendMessage() {
     if (state.mode === 'persona' && state.activePersona) {
       systemPrompt = state.activePersona.systemPrompt;
     } else if (state.mode === 'nodex') {
-      systemPrompt = SYSTEM_NODEX;
+      systemPrompt = SYSTEM_NODEX + state.nomisStatusContext;
     } else {
-      systemPrompt = SYSTEM_NOMIS;
+      systemPrompt = SYSTEM_NOMIS + state.nomisStatusContext;
     }
 
     const assistantIntro = state.mode === 'persona' && state.activePersona
@@ -997,7 +1132,9 @@ async function retryLastMessage(row, bubble) {
   try {
     let systemPrompt = state.mode === 'persona' && state.activePersona
       ? state.activePersona.systemPrompt
-      : state.mode === 'nodex' ? SYSTEM_NODEX : SYSTEM_NOMIS;
+      : state.mode === 'nodex'
+        ? SYSTEM_NODEX + state.nomisStatusContext
+        : SYSTEM_NOMIS + state.nomisStatusContext;
 
     const messages = [
       { role: 'user', content: systemPrompt + '\n\n[Begin conversation. Provide a DIFFERENT response — vary phrasing, structure, and approach.]' },
