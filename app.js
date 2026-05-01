@@ -3,7 +3,7 @@
    Uses OpenRouter API (model: anthropic/claude-3-haiku)
    ============================================================ */
 
-const OPENROUTER_API_KEY = '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'; // ← replace this
+const OPENROUTER_API_KEY = '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';
 const MODEL = 'anthropic/claude-3-haiku';
 const APP_URL = window.location.href;
 
@@ -55,7 +55,6 @@ const Auth = {
   updateProfile(email, updates) {
     const users = this.getUsers();
     if (!users[email]) return { ok: false, msg: 'User not found.' };
-    // Update password if provided
     if (updates.password) {
       if (updates.password.length < 6) return { ok: false, msg: 'Password must be at least 6 characters.' };
       users[email].password = updates.password;
@@ -100,9 +99,9 @@ const Store = {
 ══════════════════════════════════ */
 let state = {
   user: null,
-  mode: 'nomis',           // 'nomis' | 'nodex'
+  mode: 'nomis',
   activeChatId: null,
-  messages: [],            // { role, content }
+  messages: [],
   isStreaming: false,
   sidebarOpen: true,
 };
@@ -111,6 +110,33 @@ let state = {
    ELEMENT REFS
 ══════════════════════════════════ */
 const $ = id => document.getElementById(id);
+
+/* ══════════════════════════════════
+   STREAM BAR
+══════════════════════════════════ */
+function startStreamBar() {
+  const bar = $('stream-bar');
+  const fill = $('stream-bar-fill');
+  bar.classList.remove('complete');
+  bar.classList.add('active');
+  fill.style.width = '0%';
+  let w = 0;
+  return setInterval(() => {
+    w = Math.min(w + (Math.random() * 3 + 1), 88);
+    fill.style.width = w + '%';
+  }, 120);
+}
+
+function finishStreamBar(rampInterval) {
+  clearInterval(rampInterval);
+  const bar = $('stream-bar');
+  const fill = $('stream-bar-fill');
+  bar.classList.remove('active');
+  bar.classList.add('complete');
+  fill.style.width = '100%';
+  setTimeout(() => { bar.classList.remove('complete'); fill.style.width = '0%'; }, 900);
+}
+
 const authScreen   = $('auth-screen');
 const appEl        = $('app');
 const sidebar      = $('sidebar');
@@ -118,34 +144,34 @@ const sidebarOvl   = document.createElement('div');
 sidebarOvl.id = 'sidebar-overlay';
 document.body.appendChild(sidebarOvl);
 
-const loginEmail    = $('login-email');
-const loginPassword = $('login-password');
-const loginError    = $('login-error');
-const loginBtn      = $('login-btn');
-const signupName    = $('signup-name');
-const signupEmail   = $('signup-email');
-const signupPassword= $('signup-password');
-const signupError   = $('signup-error');
-const signupBtn     = $('signup-btn');
+const loginEmail     = $('login-email');
+const loginPassword  = $('login-password');
+const loginError     = $('login-error');
+const loginBtn       = $('login-btn');
+const signupName     = $('signup-name');
+const signupEmail    = $('signup-email');
+const signupPassword = $('signup-password');
+const signupError    = $('signup-error');
+const signupBtn      = $('signup-btn');
 
-const newChatBtn      = $('new-chat-btn');
-const chatHistoryEl   = $('chat-history');
-const modeBtns        = document.querySelectorAll('.mode-btn');
+const newChatBtn        = $('new-chat-btn');
+const chatHistoryEl     = $('chat-history');
+const modeBtns          = document.querySelectorAll('.mode-btn');
 const messagesContainer = $('messages-container');
-const messagesList    = $('messages-list');
-const welcomeScreen   = $('welcome-screen');
-const chatInput       = $('chat-input');
-const sendBtn         = $('send-btn');
-const sidebarToggle   = $('sidebar-toggle');
-const topbarLabel     = $('topbar-mode-label');
-const topbarIcon      = $('topbar-mode-icon');
-const inputModeHint   = $('input-mode-hint');
-const userDisplayName = $('user-display-name');
-const userDisplayEmail= $('user-display-email');
-const logoutBtn       = $('logout-btn');
-const toast           = $('toast');
-const thinkingTpl     = $('thinking-tpl');
-const charCount       = $('char-count');
+const messagesList      = $('messages-list');
+const welcomeScreen     = $('welcome-screen');
+const chatInput         = $('chat-input');
+const sendBtn           = $('send-btn');
+const sidebarToggle     = $('sidebar-toggle');
+const topbarLabel       = $('topbar-mode-label');
+const topbarIcon        = $('topbar-mode-icon');
+const inputModeHint     = $('input-mode-hint');
+const userDisplayName   = $('user-display-name');
+const userDisplayEmail  = $('user-display-email');
+const logoutBtn         = $('logout-btn');
+const toast             = $('toast');
+const thinkingTpl       = $('thinking-tpl');
+const charCount         = $('char-count');
 
 /* ══════════════════════════════════
    AUTH SCREEN LOGIC
@@ -158,6 +184,7 @@ document.querySelectorAll('.auth-tab').forEach(tab => {
     $('tab-' + tab.dataset.tab).classList.add('active');
   });
 });
+
 document.querySelectorAll('.auth-link').forEach(link => {
   link.addEventListener('click', e => {
     e.preventDefault();
@@ -226,10 +253,22 @@ function refreshUserUI() {
 
 function updateTimeGreeting() {
   const h = new Date().getHours();
-  let greet = 'Good evening.';
-  if (h < 12) greet = 'Good morning.';
-  else if (h < 17) greet = 'Good afternoon.';
-  $('welcome-title').textContent = greet;
+  const greet = h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening';
+  const fullGreeting = `${greet}, ${state.user?.name?.split(' ')[0] || 'there'}.`;
+
+  const titleEl = $('welcome-title');
+  titleEl.textContent = '';
+
+  // Blinking cursor
+  const cursor = document.createElement('span');
+  cursor.style.cssText = 'display:inline-block;width:2px;height:0.9em;background:var(--gold);margin-left:2px;vertical-align:middle;animation:blink 0.9s step-end infinite;';
+  titleEl.appendChild(cursor);
+
+  let i = 0;
+  const interval = setInterval(() => {
+    if (i >= fullGreeting.length) { clearInterval(interval); cursor.remove(); return; }
+    cursor.insertAdjacentText('beforebegin', fullGreeting[i++]);
+  }, 45);
 }
 
 /* ══════════════════════════════════
@@ -243,7 +282,8 @@ logoutBtn.addEventListener('click', () => {
   messagesList.innerHTML = '';
   appEl.style.display = 'none';
   authScreen.style.display = 'flex';
-  loginEmail.value = ''; loginPassword.value = '';
+  loginEmail.value = '';
+  loginPassword.value = '';
   loginError.textContent = '';
 });
 
@@ -282,7 +322,6 @@ function newChat() {
   chatInput.value = '';
   chatInput.style.height = 'auto';
   sendBtn.disabled = true;
-  // Don't save to store until first message
 }
 
 function loadChat(id) {
@@ -292,7 +331,6 @@ function loadChat(id) {
   state.activeChatId = id;
   state.messages = chat.messages || [];
   state.mode = chat.mode || 'nomis';
-  // Update mode UI
   modeBtns.forEach(b => b.classList.toggle('active', b.dataset.mode === state.mode));
   document.body.classList.toggle('nodex-mode', state.mode === 'nodex');
   const isNodex = state.mode === 'nodex';
@@ -301,7 +339,6 @@ function loadChat(id) {
     ? `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg> Nodex — Code Intelligence`
     : `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg> Nomis — General Intelligence`;
   chatInput.placeholder = isNodex ? 'Ask Nodex about code…' : 'Message Nomis…';
-  // Render messages
   messagesList.innerHTML = '';
   welcomeScreen.classList.add('hidden');
   state.messages.forEach(m => {
@@ -399,24 +436,23 @@ document.querySelectorAll('.chip').forEach(chip => {
    SEND MESSAGE
 ══════════════════════════════════ */
 async function sendMessage() {
+  // FIX: guard before starting bar so empty/blocked sends don't trigger it
   const text = chatInput.value.trim();
   if (!text || state.isStreaming) return;
 
+  const barRamp = startStreamBar();
   state.isStreaming = true;
   sendBtn.disabled = true;
   chatInput.value = '';
   chatInput.style.height = 'auto';
   charCount.textContent = '';
 
-  // Hide welcome screen
   welcomeScreen.classList.add('hidden');
 
-  // Add user message
   state.messages.push({ role: 'user', content: text });
   appendMessage('user', text);
   scrollToBottom();
 
-  // If first message, create chat record
   const isFirstMessage = Store.get().find(c => c.id === state.activeChatId) == null;
   if (isFirstMessage) {
     const title = text.length > 50 ? text.slice(0, 50) + '…' : text;
@@ -430,7 +466,6 @@ async function sendMessage() {
     renderHistory();
   }
 
-  // Show thinking indicator
   const thinkingRow = thinkingTpl.content.cloneNode(true).querySelector('.thinking-row');
   messagesList.appendChild(thinkingRow);
   scrollToBottom();
@@ -467,16 +502,13 @@ async function sendMessage() {
       throw new Error(err.error?.message || `API error ${response.status}`);
     }
 
-    // Remove thinking indicator
     thinkingRow.remove();
 
-    // Create assistant bubble for streaming
     const assistantRow = createMessageRow('assistant', '');
     const bubbleEl = assistantRow.querySelector('.msg-bubble');
     messagesList.appendChild(assistantRow);
     scrollToBottom();
 
-    // Stream
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let fullContent = '';
@@ -502,7 +534,6 @@ async function sendMessage() {
       }
     }
 
-    // Save assistant message
     state.messages.push({ role: 'assistant', content: fullContent });
     Store.updateChat(state.activeChatId, { messages: state.messages });
 
@@ -512,6 +543,8 @@ async function sendMessage() {
     showToast('Error: ' + (err.message || 'Request failed'));
   }
 
+  // FIX: finishStreamBar is always called here, after the stream loop
+  finishStreamBar(barRamp);
   state.isStreaming = false;
   sendBtn.disabled = chatInput.value.trim() === '';
   scrollToBottom();
@@ -557,24 +590,147 @@ function createMessageRow(role, content) {
 
   const senderDiv = document.createElement('div');
   senderDiv.className = 'msg-sender';
-  senderDiv.textContent = role === 'assistant' ? (state.mode === 'nodex' ? 'Nodex' : 'Nomis') : (state.user?.name || 'You');
+  senderDiv.textContent = role === 'assistant'
+    ? (state.mode === 'nodex' ? 'Nodex' : 'Nomis')
+    : (state.user?.name || 'You');
 
   const bubble = document.createElement('div');
   bubble.className = `msg-bubble ${role}`;
-  bubble.innerHTML = role === 'assistant' ? renderMarkdown(content) : escHtml(content).replace(/\n/g, '<br>');
-  if (role === 'assistant') addCopyButtons(bubble);
+  bubble.innerHTML = role === 'assistant'
+    ? renderMarkdown(content)
+    : escHtml(content).replace(/\n/g, '<br>');
 
   const timeDiv = document.createElement('div');
   timeDiv.className = 'msg-time';
   timeDiv.textContent = formatTime(new Date());
 
+  // FIX: build contentDiv in correct order — sender, bubble, actions (if ai), time
   contentDiv.appendChild(senderDiv);
   contentDiv.appendChild(bubble);
+
+  if (role === 'assistant') {
+    // FIX: addCopyButtons called only once, here
+    addCopyButtons(bubble);
+
+    const actions = document.createElement('div');
+    actions.className = 'msg-actions';
+    actions.innerHTML = `
+      <button class="action-btn retry-btn" title="Retry">
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.5"/></svg>
+        Retry
+      </button>
+      <button class="action-btn copy-msg-btn" title="Copy message">
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        Copy
+      </button>`;
+
+    actions.querySelector('.retry-btn').addEventListener('click', () => retryLastMessage(row, bubble));
+    actions.querySelector('.copy-msg-btn').addEventListener('click', (e) => {
+      const btn = e.currentTarget;
+      navigator.clipboard.writeText(bubble.innerText).then(() => {
+        btn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg> Copied!`;
+        setTimeout(() => {
+          btn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy`;
+        }, 2000);
+      });
+    });
+
+    contentDiv.appendChild(actions);
+  }
+
   contentDiv.appendChild(timeDiv);
 
   row.appendChild(avatarDiv);
   row.appendChild(contentDiv);
   return row;
+}
+
+/* ══════════════════════════════════
+   RETRY
+══════════════════════════════════ */
+async function retryLastMessage(row, bubble) {
+  if (state.isStreaming) return;
+
+  // Find and remove the last assistant message from state
+  const lastAiIdx = state.messages.map(m => m.role).lastIndexOf('assistant');
+  if (lastAiIdx === -1) return;
+  state.messages = state.messages.slice(0, lastAiIdx);
+
+  // Clear the bubble and re-stream into it
+  bubble.innerHTML = '';
+  state.isStreaming = true;
+  sendBtn.disabled = true;
+
+  const barRamp = startStreamBar();
+  const streamStatus = $('stream-status');
+  if (streamStatus) streamStatus.classList.add('visible');
+
+  try {
+    const systemPrompt = state.mode === 'nodex' ? SYSTEM_NODEX : SYSTEM_NOMIS;
+    const messages = [
+      { role: 'user', content: systemPrompt + '\n\n[Begin conversation. Please provide a DIFFERENT response than any previous ones — vary your phrasing, structure, and approach.]' },
+      { role: 'assistant', content: state.mode === 'nodex'
+          ? 'Understood. I am Nodex — ready to assist with a fresh perspective.'
+          : 'Understood. I am Nomis — I will approach this differently.' },
+      ...state.messages
+    ];
+
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+        'HTTP-Referer': APP_URL,
+        'X-Title': 'Nomis AI',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        messages,
+        stream: true,
+        max_tokens: 2048,
+        temperature: state.mode === 'nodex' ? 0.5 : 1.0
+      })
+    });
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.error?.message || `API error ${response.status}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let fullContent = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const lines = decoder.decode(value, { stream: true }).split('\n').filter(l => l.startsWith('data: '));
+      for (const line of lines) {
+        const data = line.slice(6).trim();
+        if (data === '[DONE]') continue;
+        try {
+          const delta = JSON.parse(data).choices?.[0]?.delta?.content || '';
+          if (delta) {
+            fullContent += delta;
+            bubble.innerHTML = renderMarkdown(fullContent);
+            addCopyButtons(bubble);
+            scrollToBottom();
+          }
+        } catch { /* skip */ }
+      }
+    }
+
+    state.messages.push({ role: 'assistant', content: fullContent });
+    Store.updateChat(state.activeChatId, { messages: state.messages });
+
+  } catch (err) {
+    showToast('Retry failed: ' + (err.message || 'Request failed'));
+  }
+
+  finishStreamBar(barRamp);
+  if (streamStatus) streamStatus.classList.remove('visible');
+  state.isStreaming = false;
+  sendBtn.disabled = chatInput.value.trim() === '';
 }
 
 /* ══════════════════════════════════
@@ -599,11 +755,9 @@ function renderMarkdown(text) {
   html = html.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
   html = html.replace(/_([^_\n]+)_/g, '<em>$1</em>');
 
-  // H3
+  // Headings
   html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
-  // H2
-  html = html.replace(/^## (.+)$/gm, '<h2>$2</h2>'.replace('$2', '$1'));
-  // H1
+  html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
   html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
 
   // Unordered list
@@ -613,7 +767,7 @@ function renderMarkdown(text) {
   // Ordered list
   html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
 
-  // Paragraphs (double newline)
+  // Paragraphs
   html = html.replace(/\n{2,}/g, '</p><p>');
   html = html.replace(/\n/g, '<br>');
   if (!html.startsWith('<')) html = '<p>' + html + '</p>';
@@ -685,18 +839,18 @@ const profileBioCount  = $('profile-bio-count');
 const profilePassInput = $('profile-password-input');
 const profileError     = $('profile-error');
 const profileSaveBtn   = $('profile-save-btn');
-const profileAvatarDisp= $('profile-avatar-display');
-const profileAvatarInp = $('profile-avatar-input');
-const profileAvatarRem = $('profile-avatar-remove');
+const profileAvatarDisp = $('profile-avatar-display');
+const profileAvatarInp  = $('profile-avatar-input');
+const profileAvatarRem  = $('profile-avatar-remove');
 
-let pendingAvatar = null; // base64 string or '' (remove)
+let pendingAvatar = null;
 
 function openProfileModal() {
   const u = state.user;
-  profileNameInput.value  = u.name || '';
+  profileNameInput.value = u.name || '';
   profileEmailDisp.textContent = u.email || '';
-  profileBioInput.value   = u.bio || '';
-  profilePassInput.value  = '';
+  profileBioInput.value = u.bio || '';
+  profilePassInput.value = '';
   profileError.textContent = '';
   pendingAvatar = null;
   profileBioCount.textContent = `${(u.bio || '').length} / 160`;
@@ -720,14 +874,12 @@ function renderProfileAvatar(src) {
   }
 }
 
-// Open via edit icon or clicking user-info
 $('edit-profile-icon').addEventListener('click', e => { e.stopPropagation(); openProfileModal(); });
 $('user-info').addEventListener('click', openProfileModal);
 
 profileClose.addEventListener('click', closeProfileModal);
 profileOverlay.addEventListener('click', e => { if (e.target === profileOverlay) closeProfileModal(); });
 
-// Avatar file pick
 profileAvatarInp.addEventListener('change', () => {
   const file = profileAvatarInp.files[0];
   if (!file) return;
@@ -745,18 +897,15 @@ profileAvatarInp.addEventListener('change', () => {
   profileAvatarInp.value = '';
 });
 
-// Remove avatar
 profileAvatarRem.addEventListener('click', () => {
   pendingAvatar = '';
   renderProfileAvatar(null);
 });
 
-// Bio counter
 profileBioInput.addEventListener('input', () => {
   profileBioCount.textContent = `${profileBioInput.value.length} / 160`;
 });
 
-// Save
 profileSaveBtn.addEventListener('click', () => {
   const name = profileNameInput.value.trim();
   const bio  = profileBioInput.value.trim();
