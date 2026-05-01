@@ -35,7 +35,8 @@ const firebaseConfig = {
   storageBucket: "nomis-b5dd7.firebasestorage.app",
   messagingSenderId: "840145807175",
   appId: "1:840145807175:web:a46982ba6789d53dc54e62",
-  measurementId: "G-JN9F4RBC3D"
+  measurementId: "G-JN9F4RBC3D",
+  databaseURL: "https://nomis-b5dd7-default-rtdb.firebaseio.com"
 };
 
 const firebaseApp = initializeApp(firebaseConfig);
