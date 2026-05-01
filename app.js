@@ -1,11 +1,46 @@
 /* ============================================================
    Nomis AI — app.js
    Uses OpenRouter API (model: anthropic/claude-3-haiku)
+   Firebase Auth + Firestore for accounts
    ============================================================ */
 
 const OPENROUTER_API_KEY = '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';
 const MODEL = 'anthropic/claude-3-haiku';
 const APP_URL = window.location.href;
+
+/* ── Firebase Config ── */
+import { initializeApp } from "https://www.gstatic.com/firebasejs/11.7.1/firebase-app.js";
+import {
+  getAuth,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  signOut,
+  onAuthStateChanged,
+  updatePassword,
+  EmailAuthProvider,
+  reauthenticateWithCredential
+} from "https://www.gstatic.com/firebasejs/11.7.1/firebase-auth.js";
+import {
+  getFirestore,
+  doc,
+  setDoc,
+  getDoc,
+  updateDoc
+} from "https://www.gstatic.com/firebasejs/11.7.1/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyBDCr4lwOF-nByznKkrN9XYmnTmJQpeo88",
+  authDomain: "nomis-b5dd7.firebaseapp.com",
+  projectId: "nomis-b5dd7",
+  storageBucket: "nomis-b5dd7.firebasestorage.app",
+  messagingSenderId: "840145807175",
+  appId: "1:840145807175:web:a46982ba6789d53dc54e62",
+  measurementId: "G-JN9F4RBC3D"
+};
+
+const firebaseApp = initializeApp(firebaseConfig);
+const auth = getAuth(firebaseApp);
+const db = getFirestore(firebaseApp);
 
 /* ── System prompts ── */
 const SYSTEM_NOMIS = `You are Nomis — an intelligent, eloquent AI assistant created by NoteShelf. You have a refined, sophisticated personality. You are thoughtful, articulate, and helpful. You speak with clarity and elegance, never verbose for the sake of it. You can assist with any topic: writing, analysis, research, creative work, planning, and more. Format your responses with markdown when it aids readability.`;
@@ -13,63 +48,81 @@ const SYSTEM_NOMIS = `You are Nomis — an intelligent, eloquent AI assistant cr
 const SYSTEM_NODEX = `You are Nodex — a powerful code-focused AI built by NoteShelf. You specialize in programming, software architecture, debugging, and technical problem-solving. You provide clean, well-commented code. You prefer precision over verbosity. When writing code, always use proper code blocks with language identifiers. You support all major languages and frameworks. You think like a senior engineer.`;
 
 /* ══════════════════════════════════
-   MINI AUTH (localStorage-based)
+   FIREBASE AUTH HELPERS
 ══════════════════════════════════ */
 const Auth = {
-  STORE_KEY: 'nomis_users',
-  SESSION_KEY: 'nomis_session',
-
-  getUsers() {
-    try { return JSON.parse(localStorage.getItem(this.STORE_KEY) || '{}'); } catch { return {}; }
-  },
-  saveUsers(u) { localStorage.setItem(this.STORE_KEY, JSON.stringify(u)); },
-  getSession() {
-    try { return JSON.parse(localStorage.getItem(this.SESSION_KEY) || 'null'); } catch { return null; }
-  },
-  saveSession(u) { localStorage.setItem(this.SESSION_KEY, JSON.stringify(u)); },
-  clearSession() { localStorage.removeItem(this.SESSION_KEY); },
-
-  signup(name, email, password) {
+  async signup(name, email, password) {
     if (!name || !email || !password) return { ok: false, msg: 'All fields are required.' };
     if (password.length < 6) return { ok: false, msg: 'Password must be at least 6 characters.' };
-    const users = this.getUsers();
-    if (users[email]) return { ok: false, msg: 'An account with this email already exists.' };
-    const user = { name, email, bio: '', avatar: '', createdAt: Date.now() };
-    users[email] = { ...user, password };
-    this.saveUsers(users);
-    this.saveSession(user);
-    return { ok: true, user };
-  },
-
-  login(email, password) {
-    if (!email || !password) return { ok: false, msg: 'Please fill in all fields.' };
-    const users = this.getUsers();
-    const u = users[email];
-    if (!u) return { ok: false, msg: 'No account found with this email.' };
-    if (u.password !== password) return { ok: false, msg: 'Incorrect password.' };
-    const user = { name: u.name, email: u.email, bio: u.bio || '', avatar: u.avatar || '' };
-    this.saveSession(user);
-    return { ok: true, user };
-  },
-
-  updateProfile(email, updates) {
-    const users = this.getUsers();
-    if (!users[email]) return { ok: false, msg: 'User not found.' };
-    if (updates.password) {
-      if (updates.password.length < 6) return { ok: false, msg: 'Password must be at least 6 characters.' };
-      users[email].password = updates.password;
+    try {
+      const cred = await createUserWithEmailAndPassword(auth, email, password);
+      const user = { name, email, bio: '', avatar: '', uid: cred.user.uid };
+      await setDoc(doc(db, 'users', cred.user.uid), user);
+      return { ok: true, user };
+    } catch (e) {
+      return { ok: false, msg: friendlyError(e.code) };
     }
-    if (updates.name !== undefined) users[email].name = updates.name;
-    if (updates.bio  !== undefined) users[email].bio  = updates.bio;
-    if (updates.avatar !== undefined) users[email].avatar = updates.avatar;
-    this.saveUsers(users);
-    const user = { name: users[email].name, email, bio: users[email].bio, avatar: users[email].avatar };
-    this.saveSession(user);
-    return { ok: true, user };
   },
 
-  logout() { this.clearSession(); }
+  async login(email, password) {
+    if (!email || !password) return { ok: false, msg: 'Please fill in all fields.' };
+    try {
+      const cred = await signInWithEmailAndPassword(auth, email, password);
+      const snap = await getDoc(doc(db, 'users', cred.user.uid));
+      const data = snap.exists() ? snap.data() : { name: email.split('@')[0], email, bio: '', avatar: '' };
+      return { ok: true, user: { ...data, uid: cred.user.uid } };
+    } catch (e) {
+      return { ok: false, msg: friendlyError(e.code) };
+    }
+  },
+
+  async updateProfile(uid, updates) {
+    try {
+      const snap = await getDoc(doc(db, 'users', uid));
+      if (!snap.exists()) return { ok: false, msg: 'User not found.' };
+      const current = snap.data();
+      const merged = { ...current };
+      if (updates.name !== undefined) merged.name = updates.name;
+      if (updates.bio !== undefined) merged.bio = updates.bio;
+      if (updates.avatar !== undefined) merged.avatar = updates.avatar;
+
+      if (updates.password) {
+        if (updates.password.length < 6) return { ok: false, msg: 'Password must be at least 6 characters.' };
+        try {
+          await updatePassword(auth.currentUser, updates.password);
+        } catch (e) {
+          if (e.code === 'auth/requires-recent-login') {
+            return { ok: false, msg: 'Please sign out and sign back in before changing your password.' };
+          }
+          return { ok: false, msg: friendlyError(e.code) };
+        }
+      }
+
+      await updateDoc(doc(db, 'users', uid), merged);
+      return { ok: true, user: { ...merged, uid } };
+    } catch (e) {
+      return { ok: false, msg: friendlyError(e.code) };
+    }
+  },
+
+  async logout() {
+    await signOut(auth);
+  }
 };
+
+function friendlyError(code) {
+  const map = {
+    'auth/email-already-in-use': 'An account with this email already exists.',
+    'auth/invalid-email': 'Please enter a valid email address.',
+    'auth/weak-password': 'Password must be at least 6 characters.',
+    'auth/user-not-found': 'No account found with this email.',
+    'auth/wrong-password': 'Incorrect password.',
+    'auth/invalid-credential': 'Incorrect email or password.',
+    'auth/too-many-requests': 'Too many attempts. Please try again later.',
+    'auth/network-request-failed': 'Network error. Check your connection.',
+  };
+  return map[code] || 'Something went wrong. Please try again.';
+}
 
 /* ══════════════════════════════════
    CHAT STORE
@@ -198,16 +251,27 @@ document.querySelectorAll('.auth-link').forEach(link => {
   });
 });
 
-loginBtn.addEventListener('click', () => {
-  const res = Auth.login(loginEmail.value.trim(), loginPassword.value);
+function setAuthLoading(btn, loading) {
+  btn.disabled = loading;
+  btn.style.opacity = loading ? '0.6' : '';
+  const span = btn.querySelector('span');
+  if (span) span.textContent = loading ? 'Please wait…' : (btn === loginBtn ? 'Enter the Vault' : 'Begin Journey');
+}
+
+loginBtn.addEventListener('click', async () => {
+  setAuthLoading(loginBtn, true);
+  const res = await Auth.login(loginEmail.value.trim(), loginPassword.value);
+  setAuthLoading(loginBtn, false);
   if (!res.ok) { loginError.textContent = res.msg; return; }
   loginError.textContent = '';
   startApp(res.user);
 });
 [loginEmail, loginPassword].forEach(el => el.addEventListener('keydown', e => { if (e.key === 'Enter') loginBtn.click(); }));
 
-signupBtn.addEventListener('click', () => {
-  const res = Auth.signup(signupName.value.trim(), signupEmail.value.trim(), signupPassword.value);
+signupBtn.addEventListener('click', async () => {
+  setAuthLoading(signupBtn, true);
+  const res = await Auth.signup(signupName.value.trim(), signupEmail.value.trim(), signupPassword.value);
+  setAuthLoading(signupBtn, false);
   if (!res.ok) { signupError.textContent = res.msg; return; }
   signupError.textContent = '';
   startApp(res.user);
@@ -259,7 +323,6 @@ function updateTimeGreeting() {
   const titleEl = $('welcome-title');
   titleEl.textContent = '';
 
-  // Blinking cursor
   const cursor = document.createElement('span');
   cursor.style.cssText = 'display:inline-block;width:2px;height:0.9em;background:var(--gold);margin-left:2px;vertical-align:middle;animation:blink 0.9s step-end infinite;';
   titleEl.appendChild(cursor);
@@ -274,8 +337,8 @@ function updateTimeGreeting() {
 /* ══════════════════════════════════
    LOGOUT
 ══════════════════════════════════ */
-logoutBtn.addEventListener('click', () => {
-  Auth.logout();
+logoutBtn.addEventListener('click', async () => {
+  await Auth.logout();
   state.user = null;
   state.messages = [];
   state.activeChatId = null;
@@ -285,6 +348,24 @@ logoutBtn.addEventListener('click', () => {
   loginEmail.value = '';
   loginPassword.value = '';
   loginError.textContent = '';
+});
+
+/* ══════════════════════════════════
+   FIREBASE AUTH STATE OBSERVER
+══════════════════════════════════ */
+onAuthStateChanged(auth, async (firebaseUser) => {
+  if (firebaseUser && !state.user) {
+    // Restore session on page reload
+    try {
+      const snap = await getDoc(doc(db, 'users', firebaseUser.uid));
+      if (snap.exists()) {
+        const userData = { ...snap.data(), uid: firebaseUser.uid };
+        startApp(userData);
+      }
+    } catch (e) {
+      console.warn('Could not restore session:', e);
+    }
+  }
 });
 
 /* ══════════════════════════════════
@@ -436,7 +517,6 @@ document.querySelectorAll('.chip').forEach(chip => {
    SEND MESSAGE
 ══════════════════════════════════ */
 async function sendMessage() {
-  // FIX: guard before starting bar so empty/blocked sends don't trigger it
   const text = chatInput.value.trim();
   if (!text || state.isStreaming) return;
 
@@ -543,7 +623,6 @@ async function sendMessage() {
     showToast('Error: ' + (err.message || 'Request failed'));
   }
 
-  // FIX: finishStreamBar is always called here, after the stream loop
   finishStreamBar(barRamp);
   state.isStreaming = false;
   sendBtn.disabled = chatInput.value.trim() === '';
@@ -604,12 +683,10 @@ function createMessageRow(role, content) {
   timeDiv.className = 'msg-time';
   timeDiv.textContent = formatTime(new Date());
 
-  // FIX: build contentDiv in correct order — sender, bubble, actions (if ai), time
   contentDiv.appendChild(senderDiv);
   contentDiv.appendChild(bubble);
 
   if (role === 'assistant') {
-    // FIX: addCopyButtons called only once, here
     addCopyButtons(bubble);
 
     const actions = document.createElement('div');
@@ -620,7 +697,7 @@ function createMessageRow(role, content) {
         Retry
       </button>
       <button class="action-btn copy-msg-btn" title="Copy message">
-        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 0-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
         Copy
       </button>`;
 
@@ -630,7 +707,7 @@ function createMessageRow(role, content) {
       navigator.clipboard.writeText(bubble.innerText).then(() => {
         btn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg> Copied!`;
         setTimeout(() => {
-          btn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy`;
+          btn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 0-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy`;
         }, 2000);
       });
     });
@@ -651,12 +728,10 @@ function createMessageRow(role, content) {
 async function retryLastMessage(row, bubble) {
   if (state.isStreaming) return;
 
-  // Find and remove the last assistant message from state
   const lastAiIdx = state.messages.map(m => m.role).lastIndexOf('assistant');
   if (lastAiIdx === -1) return;
   state.messages = state.messages.slice(0, lastAiIdx);
 
-  // Clear the bubble and re-stream into it
   bubble.innerHTML = '';
   state.isStreaming = true;
   sendBtn.disabled = true;
@@ -734,40 +809,26 @@ async function retryLastMessage(row, bubble) {
 }
 
 /* ══════════════════════════════════
-   MARKDOWN RENDERER (lightweight)
+   MARKDOWN RENDERER
 ══════════════════════════════════ */
 function renderMarkdown(text) {
   let html = escHtml(text);
 
-  // Code blocks
   html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
     return `<pre><button class="copy-code-btn" onclick="copyCode(this)">Copy</button><code class="lang-${lang}">${code.trim()}</code></pre>`;
   });
 
-  // Inline code
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-
-  // Bold
   html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   html = html.replace(/__([^_]+)__/g, '<strong>$1</strong>');
-
-  // Italic
   html = html.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
   html = html.replace(/_([^_\n]+)_/g, '<em>$1</em>');
-
-  // Headings
   html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
   html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
   html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
-
-  // Unordered list
   html = html.replace(/^[\*\-] (.+)$/gm, '<li>$1</li>');
   html = html.replace(/(<li>.*<\/li>\n?)+/g, m => `<ul>${m}</ul>`);
-
-  // Ordered list
   html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
-
-  // Paragraphs
   html = html.replace(/\n{2,}/g, '</p><p>');
   html = html.replace(/\n/g, '<br>');
   if (!html.startsWith('<')) html = '<p>' + html + '</p>';
@@ -906,7 +967,7 @@ profileBioInput.addEventListener('input', () => {
   profileBioCount.textContent = `${profileBioInput.value.length} / 160`;
 });
 
-profileSaveBtn.addEventListener('click', () => {
+profileSaveBtn.addEventListener('click', async () => {
   const name = profileNameInput.value.trim();
   const bio  = profileBioInput.value.trim();
   const pass = profilePassInput.value;
@@ -914,11 +975,19 @@ profileSaveBtn.addEventListener('click', () => {
   if (!name) { profileError.textContent = 'Display name cannot be empty.'; return; }
   profileError.textContent = '';
 
+  profileSaveBtn.disabled = true;
+  profileSaveBtn.style.opacity = '0.6';
+  const origText = profileSaveBtn.querySelector('span') || profileSaveBtn;
+
   const updates = { name, bio };
   if (pendingAvatar !== null) updates.avatar = pendingAvatar;
   if (pass) updates.password = pass;
 
-  const res = Auth.updateProfile(state.user.email, updates);
+  const res = await Auth.updateProfile(state.user.uid, updates);
+
+  profileSaveBtn.disabled = false;
+  profileSaveBtn.style.opacity = '';
+
   if (!res.ok) { profileError.textContent = res.msg; return; }
 
   state.user = res.user;
@@ -928,11 +997,32 @@ profileSaveBtn.addEventListener('click', () => {
 });
 
 /* ══════════════════════════════════
-   AUTO-LOGIN
+   DOWNLOAD MODAL
 ══════════════════════════════════ */
-(function init() {
-  const session = Auth.getSession();
-  if (session) {
-    startApp(session);
+const downloadOverlay = $('download-overlay');
+const downloadClose   = $('download-modal-close');
+const downloadBtn     = $('download-nomis-btn');
+
+downloadBtn.addEventListener('click', () => downloadOverlay.classList.add('open'));
+downloadClose.addEventListener('click', () => downloadOverlay.classList.remove('open'));
+downloadOverlay.addEventListener('click', e => { if (e.target === downloadOverlay) downloadOverlay.classList.remove('open'); });
+
+// PWA install
+let deferredInstallPrompt = null;
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  $('pwa-install-btn').style.display = 'flex';
+});
+
+$('pwa-install-btn').addEventListener('click', async () => {
+  if (!deferredInstallPrompt) return;
+  deferredInstallPrompt.prompt();
+  const { outcome } = await deferredInstallPrompt.userChoice;
+  if (outcome === 'accepted') {
+    showToast('Nomis installed successfully!');
+    downloadOverlay.classList.remove('open');
   }
-})();
+  deferredInstallPrompt = null;
+  $('pwa-install-btn').style.display = 'none';
+});
