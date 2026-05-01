@@ -570,7 +570,9 @@ async function generateChatTitle(chatId, firstMessage) {
    SEND MESSAGE
 ══════════════════════════════════ */
 async function sendMessage() {
-   // ── Owner verification interceptor ──
+  const text = chatInput.value.trim();
+  if (!text || state.isStreaming) return;
+      // ── Owner verification interceptor ──
 const OWNER_CODE = '/nomis admin unlock: he110-n0m15';
 const OWNER_KEY  = 'nomis_owner_verified';
 
@@ -591,8 +593,6 @@ if (text === OWNER_CODE) {
   scrollToBottom();
   return; // skip API call
 }
-  const text = chatInput.value.trim();
-  if (!text || state.isStreaming) return;
 
   const barRamp = startStreamBar();
   state.isStreaming = true;
