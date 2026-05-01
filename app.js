@@ -21,12 +21,12 @@ import {
   reauthenticateWithCredential
 } from "https://www.gstatic.com/firebasejs/11.7.1/firebase-auth.js";
 import {
-  getFirestore,
-  doc,
-  setDoc,
-  getDoc,
-  updateDoc
-} from "https://www.gstatic.com/firebasejs/11.7.1/firebase-firestore.js";
+  getDatabase,
+  ref,
+  set,
+  get,
+  update
+} from "https://www.gstatic.com/firebasejs/11.7.1/firebase-database.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyBDCr4lwOF-nByznKkrN9XYmnTmJQpeo88",
@@ -40,7 +40,7 @@ const firebaseConfig = {
 
 const firebaseApp = initializeApp(firebaseConfig);
 const auth = getAuth(firebaseApp);
-const db = getFirestore(firebaseApp);
+const db = getDatabase(firebaseApp);
 
 /* ── System prompts ── */
 const SYSTEM_NOMIS = `You are Nomis — an intelligent, eloquent AI assistant created by NoteShelf. You have a refined, sophisticated personality. You are thoughtful, articulate, and helpful. You speak with clarity and elegance, never verbose for the sake of it. You can assist with any topic: writing, analysis, research, creative work, planning, and more. Format your responses with markdown when it aids readability.`;
@@ -57,7 +57,7 @@ const Auth = {
     try {
       const cred = await createUserWithEmailAndPassword(auth, email, password);
       const user = { name, email, bio: '', avatar: '', uid: cred.user.uid };
-      await setDoc(doc(db, 'users', cred.user.uid), user);
+      await set(ref(db, 'users/' + cred.user.uid), user);
       return { ok: true, user };
     } catch (e) {
       return { ok: false, msg: friendlyError(e.code) };
@@ -68,8 +68,8 @@ const Auth = {
     if (!email || !password) return { ok: false, msg: 'Please fill in all fields.' };
     try {
       const cred = await signInWithEmailAndPassword(auth, email, password);
-      const snap = await getDoc(doc(db, 'users', cred.user.uid));
-      const data = snap.exists() ? snap.data() : { name: email.split('@')[0], email, bio: '', avatar: '' };
+      const snap = await get(ref(db, 'users/' + cred.user.uid));
+const data = snap.exists() ? snap.val() : { name: email.split('@')[0], email, bio: '', avatar: '' };
       return { ok: true, user: { ...data, uid: cred.user.uid } };
     } catch (e) {
       return { ok: false, msg: friendlyError(e.code) };
@@ -78,9 +78,9 @@ const Auth = {
 
   async updateProfile(uid, updates) {
     try {
-      const snap = await getDoc(doc(db, 'users', uid));
-      if (!snap.exists()) return { ok: false, msg: 'User not found.' };
-      const current = snap.data();
+      const snap = await get(ref(db, 'users/' + uid));
+if (!snap.exists()) return { ok: false, msg: 'User not found.' };
+const current = snap.val();
       const merged = { ...current };
       if (updates.name !== undefined) merged.name = updates.name;
       if (updates.bio !== undefined) merged.bio = updates.bio;
@@ -98,7 +98,7 @@ const Auth = {
         }
       }
 
-      await updateDoc(doc(db, 'users', uid), merged);
+      await update(ref(db, 'users/' + uid), merged);
       return { ok: true, user: { ...merged, uid } };
     } catch (e) {
       return { ok: false, msg: friendlyError(e.code) };
@@ -357,9 +357,9 @@ onAuthStateChanged(auth, async (firebaseUser) => {
   if (firebaseUser && !state.user) {
     // Restore session on page reload
     try {
-      const snap = await getDoc(doc(db, 'users', firebaseUser.uid));
-      if (snap.exists()) {
-        const userData = { ...snap.data(), uid: firebaseUser.uid };
+      const snap = await get(ref(db, 'users/' + firebaseUser.uid));
+if (snap.exists()) {
+  const userData = { ...snap.val(), uid: firebaseUser.uid };
         startApp(userData);
       }
     } catch (e) {
