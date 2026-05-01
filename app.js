@@ -64,7 +64,7 @@ async function checkMaintenanceMode(userEmail) {
 function showMaintenanceScreen() {
   authScreen.style.display = 'none';
   appEl.style.display = 'none';
-  const el = $('maintenance-screen');
+  const el = document.getElementById('maintenance-screen');
   if (el) el.style.display = 'flex';
 }
 
@@ -329,8 +329,13 @@ signupBtn.addEventListener('click', async () => {
 ══════════════════════════════════ */
 async function startApp(user) {
   state.user = user;
+
+  // Check BEFORE hiding auth screen
   const blocked = await checkMaintenanceMode(user.email);
-  if (blocked) return;
+  if (blocked) {
+    authScreen.style.display = 'none'; // hide auth, show maintenance
+    return;
+  }
 
   authScreen.style.display = 'none';
   appEl.style.display = 'flex';
