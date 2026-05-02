@@ -1231,25 +1231,74 @@ function speakText(text, btn) {
     .replace(/\*([^*]+)\*/g, '$1')
     .replace(/#{1,3} /g, '')
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-    .replace(/\[GENERATE_IMAGE:[^\]]+\]/gi, '') /* strip image tokens from TTS */
+    .replace(/\[GENERATE_IMAGE:[^\]]+\]/gi, '')
     .replace(/\n+/g, ' ')
     .trim();
+
   const utterance = new SpeechSynthesisUtterance(clean);
-  utterance.rate  = 1.05;
-  utterance.pitch = 1.0;
+  utterance.rate  = 0.95;   // slightly slower = more authoritative
+  utterance.pitch = 0.85;   // lower pitch = deeper, masculine
   utterance.lang  = 'en-US';
-  const tryVoice = () => {
+
+  const pickVoice = () => {
     const voices = window.speechSynthesis.getVoices();
-    const preferred = voices.find(v =>
-      v.name.includes('Google UK English Female') || v.name.includes('Samantha') ||
-      v.name.includes('Daniel') || v.name.includes('Google')
+
+    // Priority list — deep/male voices across platforms
+    const preferred = [
+      // Chrome / Edge (Windows & Mac)
+      'Google UK English Male',
+      'Microsoft Guy Online (Natural) - English (United States)',
+      'Microsoft Davis Online (Natural) - English (United States)',
+      'Microsoft Mark Online (Natural) - English (United States)',
+      'Microsoft Ryan Online (Natural) - English (United Kingdom)',
+      'Microsoft Thomas Online (Natural) - English (United Kingdom)',
+      'Microsoft George Online (Natural) - English (United Kingdom)',
+      // macOS / iOS
+      'Daniel',
+      'Fred',
+      'Alex',
+      'Tom',
+      // Android
+      'en-us-x-iom-local',
+      'en-us-x-iog-local',
+    ];
+
+    // Try preferred list first (exact match)
+    for (const name of preferred) {
+      const match = voices.find(v => v.name === name);
+      if (match) { utterance.voice = match; return; }
+    }
+
+    // Fallback: any English male voice
+    const maleFallback = voices.find(v =>
+      v.lang.startsWith('en') &&
+      /male|man|guy|david|mark|james|daniel|fred|alex|tom|george|ryan|davis/i.test(v.name)
     );
-    if (preferred) utterance.voice = preferred;
+    if (maleFallback) { utterance.voice = maleFallback; return; }
+
+    // Last resort: any English voice — pitch setting will still lower it
+    const anyEnglish = voices.find(v => v.lang.startsWith('en'));
+    if (anyEnglish) utterance.voice = anyEnglish;
   };
-  tryVoice();
-  if (window.speechSynthesis.getVoices().length === 0) { window.speechSynthesis.onvoiceschanged = tryVoice; }
-  utterance.onstart = () => { ttsSpeaking = true; ttsCurrentBtn = btn; btn.innerHTML = ttsStopHTML(); btn.classList.add('tts-active'); };
-  utterance.onend = utterance.onerror = () => { ttsSpeaking = false; ttsCurrentBtn = null; btn.innerHTML = ttsIconHTML(); btn.classList.remove('tts-active'); };
+
+  pickVoice();
+  if (window.speechSynthesis.getVoices().length === 0) {
+    window.speechSynthesis.onvoiceschanged = pickVoice;
+  }
+
+  utterance.onstart = () => {
+    ttsSpeaking = true;
+    ttsCurrentBtn = btn;
+    btn.innerHTML = ttsStopHTML();
+    btn.classList.add('tts-active');
+  };
+  utterance.onend = utterance.onerror = () => {
+    ttsSpeaking = false;
+    ttsCurrentBtn = null;
+    btn.innerHTML = ttsIconHTML();
+    btn.classList.remove('tts-active');
+  };
+
   window.speechSynthesis.speak(utterance);
 }
 
