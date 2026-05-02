@@ -1202,3 +1202,19 @@ body.persona-mode .mode-btn.active[data-mode="persona"] {
   color: #C08FFF;
   background: rgba(160,100,255,0.06);
 }
+/* ════ NOMITS DISPLAY ════ */
+#nomits-display {
+  transition: color 0.3s, border-color 0.3s;
+}
+
+/* ════ TTS BUTTON ════ */
+.tts-btn.tts-active {
+  color: var(--gold) !important;
+  border-color: rgba(184,150,12,0.5) !important;
+  background: rgba(255,215,0,0.06) !important;
+}
+
+/* ════ EDIT BUTTON (user messages) ════ */
+.msg-row.user .msg-actions {
+  justify-content: flex-end;
+}
