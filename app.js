@@ -6,7 +6,7 @@
    ============================================================ */
 
 const OPENROUTER_API_KEY = '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';
-const MODEL = 'anthropic/claude-3.5-sonnet';
+const MODEL = 'anthropic/claude-3-haiku';
 const APP_URL = window.location.href;
 
 /* ── Firebase ── */
