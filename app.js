@@ -463,9 +463,9 @@ async function refreshDegradedState() {
 /* ════════════════════════════════════════
    IMAGE GENERATION — Pollinations AI
    Free, no API key, works in-browser
+   Uses turbo model + smaller size for speed
 ════════════════════════════════════════ */
 const ImageGen = {
-  /* Parse [GENERATE_IMAGE: ...] tokens out of assistant content */
   hasToken(text) {
     return /\[GENERATE_IMAGE:\s*(.+?)\]/i.test(text);
   },
@@ -475,147 +475,185 @@ const ImageGen = {
     return match ? match[1].trim() : null;
   },
 
-  /* Build Pollinations URL — no key required */
+  /* turbo model is ~3-5x faster than flux, 512px wide is plenty for chat */
   buildUrl(prompt, seed) {
     const encoded = encodeURIComponent(prompt);
     const s = seed || Math.floor(Math.random() * 999999);
-    return `https://image.pollinations.ai/prompt/${encoded}?width=768&height=512&seed=${s}&nologo=true&model=flux`;
+    return `https://image.pollinations.ai/prompt/${encoded}?width=512&height=512&seed=${s}&nologo=true&model=turbo`;
   },
 
-  /* Render the image block inside a message bubble */
-  async renderIntoBubble(bubble, prompt, rawText) {
-    /* Replace the token text with a loading card, then swap to the real image */
-    const cleanText = rawText.replace(/\[GENERATE_IMAGE:\s*.+?\]/i, '').trim();
-    bubble.innerHTML = renderMarkdown(cleanText);
-
-    const card = document.createElement('div');
-    card.style.cssText = `
-      margin-top:14px;border-radius:12px;overflow:hidden;
-      border:1px solid rgba(184,150,12,0.25);position:relative;
-      background:rgba(184,150,12,0.06);
-    `;
-
-    const loader = document.createElement('div');
-    loader.style.cssText = `
-      display:flex;flex-direction:column;align-items:center;justify-content:center;
-      gap:12px;padding:40px 24px;
-      font-family:'Cinzel',serif;font-size:11px;letter-spacing:1.5px;
-      color:var(--gold-dim);text-align:center;
-    `;
-    loader.innerHTML = `
-      <div style="width:28px;height:28px;border:2px solid rgba(184,150,12,0.2);
-        border-top-color:var(--gold);border-radius:50%;
-        animation:spin 0.9s linear infinite;"></div>
-      <span>Generating image…</span>
-    `;
-
-    /* Inject spin keyframes once */
+  _makeLoader() {
+    /* Inject keyframes once */
     if (!$('imagegen-spin-style')) {
       const style = document.createElement('style');
       style.id = 'imagegen-spin-style';
       style.textContent = `@keyframes spin{to{transform:rotate(360deg)}}`;
       document.head.appendChild(style);
     }
+    const loader = document.createElement('div');
+    loader.className = 'imagegen-loader';
+    loader.style.cssText = `
+      display:flex;flex-direction:column;align-items:center;justify-content:center;
+      gap:10px;padding:36px 24px;
+      font-family:'Cinzel',serif;font-size:10px;letter-spacing:1.5px;
+      color:var(--gold-dim);text-align:center;
+    `;
+    loader.innerHTML = `
+      <div style="width:26px;height:26px;border:2px solid rgba(184,150,12,0.15);
+        border-top-color:var(--gold);border-radius:50%;
+        animation:spin 0.8s linear infinite;"></div>
+      <span class="imagegen-status">Generating image…</span>
+      <span class="imagegen-timer" style="opacity:0.45;font-size:9px;">0s</span>
+    `;
+    return loader;
+  },
 
+  _startTimer(loader) {
+    const timerEl = loader.querySelector('.imagegen-timer');
+    const statusEl = loader.querySelector('.imagegen-status');
+    const start = Date.now();
+    const messages = [
+      [0,  'Generating image…'],
+      [5,  'Painting the details…'],
+      [12, 'Almost there…'],
+      [20, 'Still rendering — free servers can be slow…'],
+      [35, 'Taking a bit longer than usual…'],
+    ];
+    const interval = setInterval(() => {
+      if (!loader.parentNode) { clearInterval(interval); return; }
+      const elapsed = Math.floor((Date.now() - start) / 1000);
+      if (timerEl) timerEl.textContent = elapsed + 's';
+      const msg = messages.filter(([t]) => elapsed >= t).pop();
+      if (msg && statusEl && statusEl.textContent !== msg[1]) statusEl.textContent = msg[1];
+    }, 1000);
+    return interval;
+  },
+
+  _makeCard() {
+    const card = document.createElement('div');
+    card.style.cssText = `
+      margin-top:14px;border-radius:12px;overflow:hidden;
+      border:1px solid rgba(184,150,12,0.25);
+      background:rgba(184,150,12,0.06);
+    `;
+    return card;
+  },
+
+  _makeMeta(prompt, seed, url, imgStyle) {
+    const meta = document.createElement('div');
+    meta.style.cssText = `
+      padding:8px 12px;display:flex;align-items:center;justify-content:space-between;
+      font-family:'Cinzel',serif;font-size:9px;letter-spacing:1.2px;color:var(--gold-dim);
+      border-top:1px solid rgba(184,150,12,0.15);gap:8px;flex-wrap:wrap;
+    `;
+    const label = prompt.length > 60 ? prompt.slice(0, 60) + '…' : prompt;
+    meta.innerHTML = `
+      <span style="opacity:0.6;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+        title="${escHtml(prompt)}">✦ ${escHtml(label)}</span>
+      <div style="display:flex;gap:8px;flex-shrink:0;">
+        <button class="action-btn imggen-dl" style="font-size:9px;letter-spacing:1px;">
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg> Save
+        </button>
+        <button class="action-btn imggen-regen" style="font-size:9px;letter-spacing:1px;">
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="1 4 1 10 7 10"/>
+            <path d="M3.51 15a9 9 0 1 0 .49-3.5"/>
+          </svg> Regenerate
+        </button>
+      </div>
+    `;
+    meta.querySelector('.imggen-dl').addEventListener('click', () => {
+      const a = document.createElement('a');
+      a.href = url; a.download = 'nomis-image.jpg'; a.target = '_blank'; a.click();
+    });
+    return meta;
+  },
+
+  /* Load an image into a card, with timer + 45s timeout */
+  _loadImage(card, prompt, url, imgStyleCss) {
+    const loader = this._makeLoader();
+    card.innerHTML = '';
     card.appendChild(loader);
+    const timerInterval = this._startTimer(loader);
+
+    return new Promise(resolve => {
+      let settled = false;
+      const done = () => { if (settled) return; settled = true; clearInterval(timerInterval); resolve(); };
+
+      /* 45s hard timeout — Pollinations sometimes hangs indefinitely */
+      const timeout = setTimeout(() => {
+        if (settled) return;
+        loader.innerHTML = `
+          <span style="color:rgba(255,107,107,0.75);font-family:'Cinzel',serif;
+            font-size:10px;letter-spacing:1px;padding:0 16px;">
+            Server timed out. Try regenerating — free servers are occasionally slow.
+          </span>`;
+        done();
+      }, 45000);
+
+      const img = document.createElement('img');
+      img.alt = prompt;
+      img.style.cssText = imgStyleCss || 'display:block;width:100%;max-height:480px;object-fit:cover;';
+
+      img.onload = () => {
+        clearTimeout(timeout);
+        loader.remove();
+        card.appendChild(img);
+        const meta = this._makeMeta(prompt, null, url, imgStyleCss);
+
+        meta.querySelector('.imggen-regen').addEventListener('click', () => {
+          const newSeed = Math.floor(Math.random() * 999999);
+          const newUrl = this.buildUrl(prompt, newSeed);
+          this._loadImage(card, prompt, newUrl, imgStyleCss).then(() => scrollToBottom());
+        });
+
+        card.appendChild(meta);
+        scrollToBottom();
+        done();
+      };
+
+      img.onerror = () => {
+        clearTimeout(timeout);
+        loader.innerHTML = `
+          <span style="color:rgba(255,107,107,0.75);font-family:'Cinzel',serif;
+            font-size:10px;letter-spacing:1px;">
+            Generation failed. Please try regenerating.
+          </span>`;
+        /* still show a regen button on error */
+        const regenWrap = document.createElement('div');
+        regenWrap.style.cssText = 'padding:0 0 16px;display:flex;justify-content:center;';
+        const regenBtn = document.createElement('button');
+        regenBtn.className = 'action-btn';
+        regenBtn.style.cssText = 'font-size:9px;letter-spacing:1px;margin-top:8px;';
+        regenBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.5"/></svg> Try again`;
+        regenBtn.addEventListener('click', () => {
+          const newSeed = Math.floor(Math.random() * 999999);
+          this._loadImage(card, prompt, this.buildUrl(prompt, newSeed), imgStyleCss).then(() => scrollToBottom());
+        });
+        regenWrap.appendChild(regenBtn);
+        loader.appendChild(regenWrap);
+        done();
+      };
+
+      img.src = url;
+    });
+  },
+
+  async renderIntoBubble(bubble, prompt, rawText) {
+    const cleanText = rawText.replace(/\[GENERATE_IMAGE:\s*.+?\]/i, '').trim();
+    bubble.innerHTML = renderMarkdown(cleanText);
+
+    const card = this._makeCard();
     bubble.appendChild(card);
     scrollToBottom();
 
     const seed = Math.floor(Math.random() * 999999);
     const url = this.buildUrl(prompt, seed);
-
-    return new Promise(resolve => {
-      const img = document.createElement('img');
-      img.alt = prompt;
-      img.style.cssText = `display:block;width:100%;max-height:480px;object-fit:cover;`;
-
-      const meta = document.createElement('div');
-      meta.style.cssText = `
-        padding:8px 12px;display:flex;align-items:center;justify-content:space-between;
-        font-family:'Cinzel',serif;font-size:9px;letter-spacing:1.2px;color:var(--gold-dim);
-        border-top:1px solid rgba(184,150,12,0.15);gap:8px;flex-wrap:wrap;
-      `;
-      meta.innerHTML = `
-        <span style="opacity:0.6;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
-          title="${escHtml(prompt)}">✦ ${escHtml(prompt.length > 60 ? prompt.slice(0, 60) + '…' : prompt)}</span>
-        <div style="display:flex;gap:8px;flex-shrink:0;">
-          <button class="action-btn" id="imggen-dl-${seed}" title="Download image"
-            style="font-size:9px;letter-spacing:1px;">
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-              <polyline points="7 10 12 15 17 10"/>
-              <line x1="12" y1="15" x2="12" y2="3"/>
-            </svg> Save
-          </button>
-          <button class="action-btn" id="imggen-regen-${seed}" title="Generate another"
-            style="font-size:9px;letter-spacing:1px;">
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <polyline points="1 4 1 10 7 10"/>
-              <path d="M3.51 15a9 9 0 1 0 .49-3.5"/>
-            </svg> Regenerate
-          </button>
-        </div>
-      `;
-
-      img.onload = () => {
-        loader.remove();
-        card.appendChild(img);
-        card.appendChild(meta);
-
-        const dlBtn = meta.querySelector(`#imggen-dl-${seed}`);
-        if (dlBtn) {
-          dlBtn.addEventListener('click', () => {
-            const a = document.createElement('a');
-            a.href = url; a.download = 'nomis-image.jpg';
-            a.target = '_blank'; a.click();
-          });
-        }
-
-        const regenBtn = meta.querySelector(`#imggen-regen-${seed}`);
-        if (regenBtn) {
-          regenBtn.addEventListener('click', async () => {
-            /* Replace card with a fresh loader and regenerate */
-            const newSeed = Math.floor(Math.random() * 999999);
-            const newUrl = ImageGen.buildUrl(prompt, newSeed);
-            card.innerHTML = '';
-            const newLoader = loader.cloneNode(true);
-            card.appendChild(newLoader);
-            scrollToBottom();
-
-            const newImg = document.createElement('img');
-            newImg.alt = prompt;
-            newImg.style.cssText = img.style.cssText;
-            newImg.onload = () => {
-              newLoader.remove();
-              card.appendChild(newImg);
-              const newMeta = meta.cloneNode(true);
-              /* Re-wire buttons on the clone */
-              card.appendChild(newMeta);
-              const ndl = newMeta.querySelector(`#imggen-dl-${seed}`);
-              if (ndl) { ndl.id = `imggen-dl-${newSeed}`; ndl.addEventListener('click', () => { const a = document.createElement('a'); a.href = newUrl; a.download = 'nomis-image.jpg'; a.target = '_blank'; a.click(); }); }
-              const nreg = newMeta.querySelector(`#imggen-regen-${seed}`);
-              if (nreg) nreg.addEventListener('click', regenBtn.onclick);
-              scrollToBottom();
-            };
-            newImg.onerror = () => { newLoader.innerHTML = `<span style="color:rgba(255,107,107,0.7);font-family:'Cinzel',serif;font-size:11px;">Image generation failed. Please try again.</span>`; };
-            newImg.src = newUrl;
-          });
-        }
-
-        scrollToBottom();
-        resolve();
-      };
-
-      img.onerror = () => {
-        loader.innerHTML = `
-          <span style="color:rgba(255,107,107,0.7);font-family:'Cinzel',serif;font-size:11px;letter-spacing:1px;">
-            Image generation failed. Please try again.
-          </span>`;
-        resolve();
-      };
-
-      img.src = url;
-    });
+    await this._loadImage(card, prompt, url, 'display:block;width:100%;max-height:480px;object-fit:cover;');
   }
 };
 
