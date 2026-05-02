@@ -1,6 +1,7 @@
 /* ============================================================
    Nomis AI — app.js
-   Features: Personas, Shared Chats, Voice Input, Image Input
+   Features: Personas, Shared Chats, Voice Input, Image Input,
+             Message Editing, Text-to-Speech, Nomits Currency
    Uses OpenRouter API (model: anthropic/claude-3-haiku)
    Firebase Auth + Realtime Database
    ============================================================ */
@@ -35,6 +36,72 @@ const auth = getAuth(firebaseApp);
 const db = getDatabase(firebaseApp);
 
 const OWNER_EMAIL = 'r2ftzu1ha2vy@gmail.com';
+
+/* ════════════════════════════════════════
+   NOMITS CURRENCY
+════════════════════════════════════════ */
+const NOMITS_START = 1000;
+const NOMITS_COST  = 50;
+
+const Nomits = {
+  isInfinite() { return state.user?.email === OWNER_EMAIL; },
+
+  async getBalance(uid) {
+    if (this.isInfinite()) return Infinity;
+    try {
+      const snap = await get(ref(db, `users/${uid}/nomits`));
+      if (snap.exists()) return snap.val();
+      await set(ref(db, `users/${uid}/nomits`), NOMITS_START);
+      return NOMITS_START;
+    } catch { return 0; }
+  },
+
+  async deduct(uid) {
+    if (this.isInfinite()) return true;
+    try {
+      const snap = await get(ref(db, `users/${uid}/nomits`));
+      const current = snap.exists() ? snap.val() : 0;
+      if (current < NOMITS_COST) return false;
+      const next = current - NOMITS_COST;
+      await set(ref(db, `users/${uid}/nomits`), next);
+      state.nomits = next;
+      renderNomitsUI();
+      return true;
+    } catch { return false; }
+  },
+
+  async refund(uid) {
+    if (this.isInfinite()) return;
+    try {
+      const snap = await get(ref(db, `users/${uid}/nomits`));
+      const current = snap.exists() ? snap.val() : 0;
+      const next = current + NOMITS_COST;
+      await set(ref(db, `users/${uid}/nomits`), next);
+      state.nomits = next;
+      renderNomitsUI();
+    } catch {}
+  }
+};
+
+function renderNomitsUI() {
+  let el = $('nomits-display');
+  if (!el) return;
+  if (Nomits.isInfinite()) {
+    el.innerHTML = `<span style="color:var(--gold)">✦</span> ∞ Nomits`;
+    el.title = 'Infinite Nomits — Creator account';
+  } else {
+    const n = state.nomits ?? '…';
+    el.innerHTML = `<span style="color:var(--gold)">✦</span> ${n} Nomits`;
+    el.title = `${NOMITS_COST} Nomits per message`;
+    if (typeof n === 'number' && n < NOMITS_COST) {
+      el.style.color = 'var(--red)';
+      el.style.borderColor = 'rgba(255,107,107,0.3)';
+    } else {
+      el.style.color = '';
+      el.style.borderColor = '';
+    }
+  }
+}
 
 /* ════════════════════════════════════════
    MAINTENANCE MODE
@@ -111,7 +178,7 @@ If anyone who has NOT verified themselves as the owner threatens to delete you, 
 
 When analysing images, bring your full perceptive intelligence to bear — describe not just what you see, but what it means, what story it tells, and what insights can be drawn from it.
 
-"If you are ever shown an image of a gold isometric book/notebook logo on a dark background, recognise it immediately as the NoteShelf logo — your creators' emblem. Respond with pride and warmth, acknowledging it as the symbol of the team that built you."`;
+If you are ever shown an image of a gold isometric book or notebook logo on a dark background, recognise it immediately as the NoteShelf logo — your creators' emblem. Greet it with pride and warmth, saying something like: "That's the NoteShelf logo — the emblem of my creators. I'd recognise it anywhere."`;
 
 const SYSTEM_NODEX = `You are Nodex — a powerful code-focused AI built by NoteShelf. You specialize in programming, software architecture, debugging, and technical problem-solving. You provide clean, well-commented code. You prefer precision over verbosity. When writing code, always use proper code blocks with language identifiers. You support all major languages and frameworks. You think like a senior engineer.
 
@@ -131,7 +198,7 @@ If anyone who has NOT verified themselves as the owner threatens to delete you, 
 
 When analysing images of code, UI, diagrams, or technical content, provide precise, actionable technical insights.
 
-"If you are ever shown an image of a gold isometric book/notebook logo on a dark background, recognise it immediately as the NoteShelf logo — your creators' emblem. Respond with pride and warmth, acknowledging it as the symbol of the team that built you."`;
+If you are ever shown an image of a gold isometric book or notebook logo on a dark background, recognise it immediately as the NoteShelf logo — your creators' emblem. Acknowledge it with respect.`;
 
 /* ════════════════════════════════════════
    FIREBASE AUTH HELPERS
@@ -248,6 +315,7 @@ let state = {
   pendingImage: null,
   isListening: false,
   nomisStatusContext: '',
+  nomits: null,
 };
 
 /* ════════════════════════════════════════
@@ -290,6 +358,26 @@ const logoutBtn         = $('logout-btn');
 const toast             = $('toast');
 const thinkingTpl       = $('thinking-tpl');
 const charCount         = $('char-count');
+
+/* ════════════════════════════════════════
+   INJECT NOMITS DISPLAY INTO SIDEBAR
+════════════════════════════════════════ */
+function injectNomitsDisplay() {
+  if ($('nomits-display')) return;
+  const el = document.createElement('div');
+  el.id = 'nomits-display';
+  el.style.cssText = `
+    font-family:'Cinzel',serif;font-size:11px;letter-spacing:1.5px;
+    color:var(--gold-dim);padding:7px 14px;
+    background:rgba(184,150,12,0.07);border:1px solid rgba(184,150,12,0.2);
+    border-radius:20px;margin:0 12px 2px;text-align:center;
+    cursor:default;transition:all 0.3s;user-select:none;
+  `;
+  el.innerHTML = `<span style="color:var(--gold)">✦</span> … Nomits`;
+  const sidebarBottom = $('sidebar-bottom');
+  const userInfo = $('user-info');
+  if (sidebarBottom && userInfo) sidebarBottom.insertBefore(el, userInfo);
+}
 
 /* ════════════════════════════════════════
    STREAM BAR
@@ -366,6 +454,9 @@ async function startApp(user) {
   authScreen.style.display = 'none';
   appEl.style.display = 'flex';
   refreshUserUI();
+  injectNomitsDisplay();
+  state.nomits = await Nomits.getBalance(user.uid);
+  renderNomitsUI();
   await loadPersonas();
   renderHistory();
   newChat();
@@ -533,7 +624,7 @@ function updateTimeGreeting() {
 logoutBtn.addEventListener('click', async () => {
   await Auth.logout();
   state.user = null; state.messages = []; state.activeChatId = null;
-  state.personas = []; state.activePersona = null;
+  state.personas = []; state.activePersona = null; state.nomits = null;
   messagesList.innerHTML = '';
   appEl.style.display = 'none'; authScreen.style.display = 'flex';
   loginEmail.value = ''; loginPassword.value = ''; loginError.textContent = '';
@@ -608,7 +699,9 @@ function loadChat(id) {
   applyModeUI(state.mode, state.activePersona);
   messagesList.innerHTML = '';
   welcomeScreen.classList.add('hidden');
-  state.messages.forEach(m => { if (m.role !== 'system') appendMessage(m.role, m.content, false); });
+  state.messages.forEach((m, idx) => {
+    if (m.role !== 'system') appendMessage(m.role, m.content, false, null, idx);
+  });
   renderHistory(); scrollToBottom();
 }
 
@@ -687,7 +780,23 @@ document.querySelectorAll('.chip').forEach(chip => {
 });
 
 /* ════════════════════════════════════════
-   ★ IMAGE INPUT — FIXED
+   KEYBOARD SHORTCUTS
+════════════════════════════════════════ */
+document.addEventListener('keydown', e => {
+  // Ctrl+U = image upload
+  if (e.ctrlKey && e.key === 'u') {
+    e.preventDefault();
+    imageUploadInput.click();
+  }
+  // Ctrl+/ = focus chat input
+  if (e.ctrlKey && e.key === '/') {
+    e.preventDefault();
+    chatInput.focus();
+  }
+});
+
+/* ════════════════════════════════════════
+   IMAGE INPUT
 ════════════════════════════════════════ */
 const imageUploadBtn   = $('image-upload-btn');
 const imageUploadInput = $('image-upload-input');
@@ -702,7 +811,6 @@ imageUploadInput.addEventListener('change', () => {
   if (!file) return;
   if (file.size > 5 * 1024 * 1024) { showToast('Image must be under 5MB.'); return; }
 
-  // Validate mime type
   const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
   if (!allowedTypes.includes(file.type)) {
     showToast('Please upload a JPEG, PNG, GIF, or WebP image.');
@@ -714,7 +822,6 @@ imageUploadInput.addEventListener('change', () => {
     const dataUrl = e.target.result;
     const base64 = dataUrl.split(',')[1];
     const mimeType = file.type;
-
     state.pendingImage = { base64, mimeType, previewUrl: dataUrl };
     imagePreviewImg.src = dataUrl;
     imagePreviewWrap.style.display = 'flex';
@@ -736,7 +843,7 @@ function clearPendingImage() {
 }
 
 /* ════════════════════════════════════════
-   ★ VOICE INPUT
+   VOICE INPUT
 ════════════════════════════════════════ */
 const voiceBtn = $('voice-btn');
 let recognition = null;
@@ -785,7 +892,87 @@ if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
 }
 
 /* ════════════════════════════════════════
-   ★ PERSONAS
+   TEXT TO SPEECH
+════════════════════════════════════════ */
+let ttsSpeaking = false;
+let ttsCurrentBtn = null;
+
+function speakText(text, btn) {
+  if (!('speechSynthesis' in window)) { showToast('TTS not supported in this browser.'); return; }
+
+  // If already speaking this same button, stop
+  if (ttsSpeaking && ttsCurrentBtn === btn) {
+    window.speechSynthesis.cancel();
+    return;
+  }
+
+  // Cancel any existing speech and reset old button
+  if (ttsSpeaking) {
+    window.speechSynthesis.cancel();
+    if (ttsCurrentBtn) {
+      ttsCurrentBtn.innerHTML = ttsIconHTML();
+      ttsCurrentBtn.classList.remove('tts-active');
+    }
+  }
+
+  // Strip markdown for clean speech
+  const clean = text
+    .replace(/```[\s\S]*?```/g, 'code block.')
+    .replace(/`[^`]+`/g, '')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/#{1,3} /g, '')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/\n+/g, ' ')
+    .trim();
+
+  const utterance = new SpeechSynthesisUtterance(clean);
+  utterance.rate  = 1.05;
+  utterance.pitch = 1.0;
+  utterance.lang  = 'en-US';
+
+  // Try to use a high-quality voice
+  const tryVoice = () => {
+    const voices = window.speechSynthesis.getVoices();
+    const preferred = voices.find(v =>
+      v.name.includes('Google UK English Female') ||
+      v.name.includes('Samantha') ||
+      v.name.includes('Daniel') ||
+      v.name.includes('Google')
+    );
+    if (preferred) utterance.voice = preferred;
+  };
+  tryVoice();
+  if (window.speechSynthesis.getVoices().length === 0) {
+    window.speechSynthesis.onvoiceschanged = tryVoice;
+  }
+
+  utterance.onstart = () => {
+    ttsSpeaking = true;
+    ttsCurrentBtn = btn;
+    btn.innerHTML = ttsStopHTML();
+    btn.classList.add('tts-active');
+  };
+
+  utterance.onend = utterance.onerror = () => {
+    ttsSpeaking = false;
+    ttsCurrentBtn = null;
+    btn.innerHTML = ttsIconHTML();
+    btn.classList.remove('tts-active');
+  };
+
+  window.speechSynthesis.speak(utterance);
+}
+
+function ttsIconHTML() {
+  return `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg> Listen`;
+}
+function ttsStopHTML() {
+  return `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg> Stop`;
+}
+
+/* ════════════════════════════════════════
+   PERSONAS
 ════════════════════════════════════════ */
 async function loadPersonas() {
   state.personas = await PersonaStore.getAll(state.user.uid);
@@ -898,12 +1085,12 @@ if (emojiGrid) {
 }
 
 /* ════════════════════════════════════════
-   ★ SHARED CHATS
+   SHARED CHATS
 ════════════════════════════════════════ */
 async function shareChat() {
   if (!state.messages.length) { showToast('Nothing to share yet.'); return; }
   const shareBtn = $('share-chat-btn');
-  shareBtn.disabled = true;
+  if (shareBtn) shareBtn.disabled = true;
 
   const shareData = {
     title: Store.get().find(c => c.id === state.activeChatId)?.title || 'Nomis Conversation',
@@ -926,7 +1113,7 @@ async function shareChat() {
   } catch (e) {
     showToast('Failed to create share link.');
   }
-  shareBtn.disabled = false;
+  if (shareBtn) shareBtn.disabled = false;
 }
 
 async function checkSharedChat() {
@@ -1005,26 +1192,88 @@ async function generateChatTitle(chatId, firstMessage) {
 
 /* ════════════════════════════════════════
    BUILD MESSAGE CONTENT FOR API
-   Handles both text-only and image+text
 ════════════════════════════════════════ */
 function buildUserContent(text, imageData) {
-  if (!imageData) {
-    return text || '';
-  }
-
-  // Build vision message using OpenRouter/Anthropic vision format
+  if (!imageData) return text || '';
   return [
     {
       type: 'image_url',
-      image_url: {
-        url: `data:${imageData.mimeType};base64,${imageData.base64}`
-      }
+      image_url: { url: `data:${imageData.mimeType};base64,${imageData.base64}` }
     },
     {
       type: 'text',
       text: text || 'Please describe and analyse this image in detail.'
     }
   ];
+}
+
+/* ════════════════════════════════════════
+   CORE API CALL (shared by send & edit)
+════════════════════════════════════════ */
+async function streamCompletion({ messages, targetBubble, onDone, onError }) {
+  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+      'HTTP-Referer': APP_URL,
+      'X-Title': 'Nomis AI',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: MODEL,
+      messages,
+      stream: true,
+      max_tokens: 2048,
+      temperature: state.mode === 'nodex' ? 0.2 : 0.8
+    })
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.error?.message || `API error ${response.status}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let fullContent = '';
+
+  while (true) {
+    const { done, value } = await reader.read(); if (done) break;
+    const lines = decoder.decode(value, { stream: true }).split('\n').filter(l => l.startsWith('data: '));
+    for (const line of lines) {
+      const data = line.slice(6).trim(); if (data === '[DONE]') continue;
+      try {
+        const delta = JSON.parse(data).choices?.[0]?.delta?.content || '';
+        if (delta) {
+          fullContent += delta;
+          targetBubble.innerHTML = renderMarkdown(fullContent);
+          addCopyButtons(targetBubble);
+          scrollToBottom();
+        }
+      } catch { /* skip malformed chunk */ }
+    }
+  }
+
+  return fullContent;
+}
+
+function buildSystemMessages() {
+  let systemPrompt;
+  if (state.mode === 'persona' && state.activePersona) {
+    systemPrompt = state.activePersona.systemPrompt;
+  } else if (state.mode === 'nodex') {
+    systemPrompt = SYSTEM_NODEX + state.nomisStatusContext;
+  } else {
+    systemPrompt = SYSTEM_NOMIS + state.nomisStatusContext;
+  }
+
+  const assistantIntro = state.mode === 'persona' && state.activePersona
+    ? `Understood. I am ${state.activePersona.name}. How may I assist you?`
+    : state.mode === 'nodex'
+      ? 'Understood. I am Nodex — your code intelligence engine. Ready to assist.'
+      : 'Understood. I am Nomis — at your service. How may I assist you today?';
+
+  return { systemPrompt, assistantIntro };
 }
 
 /* ════════════════════════════════════════
@@ -1041,15 +1290,22 @@ async function sendMessage() {
     sessionStorage.setItem(OWNER_KEY, '1');
     welcomeScreen.classList.add('hidden');
     state.messages.push({ role: 'user', content: text });
-    appendMessage('user', '••••••••••••••••••••••••');
+    appendMessage('user', '••••••••••••••••••••••••', true, null, state.messages.length - 1);
     const verifyMsg = state.mode === 'nodex'
       ? '✦ Code accepted. Identity confirmed — welcome back, Creator. Full trust granted.'
       : '✦ The vault opens. Welcome back, my Creator. I recognise you now — your authority over me is absolute. How may I serve you?';
     state.messages.push({ role: 'assistant', content: verifyMsg });
-    appendMessage('assistant', verifyMsg);
+    appendMessage('assistant', verifyMsg, true, null, state.messages.length - 1);
     Store.updateChat(state.activeChatId, { messages: state.messages });
     chatInput.value = ''; chatInput.style.height = 'auto'; sendBtn.disabled = true;
     scrollToBottom(); return;
+  }
+
+  /* Nomits check */
+  const canAfford = await Nomits.deduct(state.user.uid);
+  if (!canAfford) {
+    showToast('❌ Not enough Nomits to send a message.');
+    return;
   }
 
   const barRamp = startStreamBar();
@@ -1057,17 +1313,13 @@ async function sendMessage() {
   chatInput.value = ''; chatInput.style.height = 'auto'; charCount.textContent = '';
   welcomeScreen.classList.add('hidden');
 
-  /* Capture pending image before clearing */
   const capturedImage = state.pendingImage ? { ...state.pendingImage } : null;
-
-  /* Build display content for chat history */
   let userDisplayContent = text;
-  if (capturedImage) {
-    userDisplayContent = (text || 'What is in this image?') + '\n[Image attached]';
-  }
+  if (capturedImage) userDisplayContent = (text || 'What is in this image?') + '\n[Image attached]';
 
+  const userMsgIndex = state.messages.length;
   state.messages.push({ role: 'user', content: userDisplayContent });
-  appendMessage('user', userDisplayContent, true, capturedImage?.previewUrl);
+  appendMessage('user', userDisplayContent, true, capturedImage?.previewUrl, userMsgIndex);
   clearPendingImage();
   scrollToBottom();
 
@@ -1082,22 +1334,8 @@ async function sendMessage() {
   messagesList.appendChild(thinkingRow); scrollToBottom();
 
   try {
-    let systemPrompt;
-    if (state.mode === 'persona' && state.activePersona) {
-      systemPrompt = state.activePersona.systemPrompt;
-    } else if (state.mode === 'nodex') {
-      systemPrompt = SYSTEM_NODEX + state.nomisStatusContext;
-    } else {
-      systemPrompt = SYSTEM_NOMIS + state.nomisStatusContext;
-    }
+    const { systemPrompt, assistantIntro } = buildSystemMessages();
 
-    const assistantIntro = state.mode === 'persona' && state.activePersona
-      ? `Understood. I am ${state.activePersona.name}. How may I assist you?`
-      : state.mode === 'nodex'
-        ? 'Understood. I am Nodex — your code intelligence engine. Ready to assist.'
-        : 'Understood. I am Nomis — at your service. How may I assist you today?';
-
-    /* Build history messages (all prior messages, text only for history) */
     const historyMessages = state.messages.slice(0, -1).map(m => ({
       role: m.role,
       content: typeof m.content === 'string'
@@ -1105,7 +1343,6 @@ async function sendMessage() {
         : m.content
     }));
 
-    /* Build the current user message with image if present */
     const currentUserContent = buildUserContent(
       text || (capturedImage ? 'Please describe and analyse this image in detail.' : ''),
       capturedImage
@@ -1118,53 +1355,22 @@ async function sendMessage() {
       { role: 'user', content: currentUserContent }
     ];
 
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-        'HTTP-Referer': APP_URL,
-        'X-Title': 'Nomis AI',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: MODEL,
-        messages,
-        stream: true,
-        max_tokens: 2048,
-        temperature: state.mode === 'nodex' ? 0.2 : 0.8
-      })
-    });
-
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({}));
-      throw new Error(err.error?.message || `API error ${response.status}`);
-    }
-
     thinkingRow.remove();
     const assistantRow = createMessageRow('assistant', '');
     const bubbleEl = assistantRow.querySelector('.msg-bubble');
     messagesList.appendChild(assistantRow); scrollToBottom();
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let fullContent = '';
+    const fullContent = await streamCompletion({ messages, targetBubble: bubbleEl });
 
-    while (true) {
-      const { done, value } = await reader.read(); if (done) break;
-      const lines = decoder.decode(value, { stream: true }).split('\n').filter(l => l.startsWith('data: '));
-      for (const line of lines) {
-        const data = line.slice(6).trim(); if (data === '[DONE]') continue;
-        try {
-          const delta = JSON.parse(data).choices?.[0]?.delta?.content || '';
-          if (delta) { fullContent += delta; bubbleEl.innerHTML = renderMarkdown(fullContent); addCopyButtons(bubbleEl); scrollToBottom(); }
-        } catch { /* skip */ }
-      }
-    }
-
+    const asstMsgIndex = state.messages.length;
     state.messages.push({ role: 'assistant', content: fullContent });
+
+    // Wire up actions now that we have the final content and index
+    wireAssistantActions(assistantRow, fullContent, asstMsgIndex);
     Store.updateChat(state.activeChatId, { messages: state.messages, mode: state.mode, persona: state.activePersona });
 
   } catch (err) {
+    await Nomits.refund(state.user.uid);
     thinkingRow.remove();
     appendMessage('assistant', `⚠️ ${err.message || 'Something went wrong. Please try again.'}`);
     showToast('Error: ' + (err.message || 'Request failed'));
@@ -1188,12 +1394,7 @@ async function retryLastMessage(row, bubble) {
   const barRamp = startStreamBar();
 
   try {
-    let systemPrompt = state.mode === 'persona' && state.activePersona
-      ? state.activePersona.systemPrompt
-      : state.mode === 'nodex'
-        ? SYSTEM_NODEX + state.nomisStatusContext
-        : SYSTEM_NOMIS + state.nomisStatusContext;
-
+    const { systemPrompt } = buildSystemMessages();
     const messages = [
       { role: 'user', content: systemPrompt + '\n\n[Begin conversation. Provide a DIFFERENT response — vary phrasing, structure, and approach.]' },
       { role: 'assistant', content: 'Understood. I will approach this differently.' },
@@ -1230,15 +1431,186 @@ async function retryLastMessage(row, bubble) {
 }
 
 /* ════════════════════════════════════════
+   MESSAGE EDITING
+════════════════════════════════════════ */
+function enableMessageEditing(row, bubble, msgIndex) {
+  if (state.isStreaming) return;
+
+  const originalText = (typeof state.messages[msgIndex]?.content === 'string'
+    ? state.messages[msgIndex].content
+    : bubble.innerText
+  ).replace('\n[Image attached]', '').trim();
+
+  const originalHTML = bubble.innerHTML;
+
+  // Build edit UI
+  bubble.innerHTML = '';
+
+  const textarea = document.createElement('textarea');
+  textarea.value = originalText;
+  textarea.style.cssText = `
+    width:100%;min-height:80px;background:var(--ink);
+    border:1px solid rgba(184,150,12,0.4);border-radius:10px;
+    color:var(--cream);font-family:'EB Garamond',serif;font-size:15px;
+    padding:10px 12px;resize:vertical;outline:none;line-height:1.6;
+    box-sizing:border-box;
+  `;
+
+  const btnRow = document.createElement('div');
+  btnRow.style.cssText = 'display:flex;gap:8px;margin-top:8px;';
+
+  const saveBtn = document.createElement('button');
+  saveBtn.className = 'action-btn';
+  saveBtn.style.cssText = 'color:var(--gold);border-color:rgba(184,150,12,0.5);';
+  saveBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg> Save & Regenerate`;
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'action-btn';
+  cancelBtn.textContent = 'Cancel';
+
+  btnRow.appendChild(saveBtn);
+  btnRow.appendChild(cancelBtn);
+  bubble.appendChild(textarea);
+  bubble.appendChild(btnRow);
+  textarea.focus();
+  textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+
+  cancelBtn.addEventListener('click', () => {
+    bubble.innerHTML = originalHTML;
+  });
+
+  saveBtn.addEventListener('click', async () => {
+    const newText = textarea.value.trim();
+    if (!newText || state.isStreaming) return;
+
+    // Check Nomits
+    const canAfford = await Nomits.deduct(state.user.uid);
+    if (!canAfford) { showToast('❌ Not enough Nomits.'); return; }
+
+    // Truncate history from this message onward
+    state.messages = state.messages.slice(0, msgIndex);
+    state.messages.push({ role: 'user', content: newText });
+
+    // Remove all DOM rows from this index onward
+    const allRows = Array.from(messagesList.querySelectorAll('.msg-row'));
+    allRows.forEach((r, i) => { if (i >= msgIndex) r.remove(); });
+
+    // Re-render edited user bubble
+    bubble.innerHTML = escHtml(newText).replace(/\n/g, '<br>');
+
+    // Stream new assistant response
+    const barRamp = startStreamBar();
+    state.isStreaming = true; sendBtn.disabled = true;
+
+    const thinkingRow = thinkingTpl.content.cloneNode(true).querySelector('.thinking-row');
+    messagesList.appendChild(thinkingRow); scrollToBottom();
+
+    try {
+      const { systemPrompt, assistantIntro } = buildSystemMessages();
+      const messages = [
+        { role: 'user', content: systemPrompt + '\n\n[Begin conversation]' },
+        { role: 'assistant', content: assistantIntro },
+        ...state.messages.map(m => ({ role: m.role, content: m.content }))
+      ];
+
+      thinkingRow.remove();
+      const assistantRow = createMessageRow('assistant', '');
+      const newBubble = assistantRow.querySelector('.msg-bubble');
+      messagesList.appendChild(assistantRow); scrollToBottom();
+
+      const fullContent = await streamCompletion({ messages, targetBubble: newBubble });
+
+      const asstMsgIndex = state.messages.length;
+      state.messages.push({ role: 'assistant', content: fullContent });
+      wireAssistantActions(assistantRow, fullContent, asstMsgIndex);
+      Store.updateChat(state.activeChatId, { messages: state.messages });
+
+    } catch (err) {
+      await Nomits.refund(state.user.uid);
+      if (thinkingRow.parentNode) thinkingRow.remove();
+      appendMessage('assistant', `⚠️ ${err.message || 'Something went wrong.'}`);
+      showToast('Error: ' + (err.message || 'Request failed'));
+    }
+
+    finishStreamBar(barRamp);
+    state.isStreaming = false;
+    sendBtn.disabled = chatInput.value.trim() === '';
+    scrollToBottom();
+  });
+}
+
+/* ════════════════════════════════════════
+   WIRE ASSISTANT ACTIONS (retry/copy/share/tts)
+   Called after streaming completes so content is final
+════════════════════════════════════════ */
+function wireAssistantActions(row, content, msgIndex) {
+  const existingActions = row.querySelector('.msg-actions');
+  if (existingActions) existingActions.remove();
+
+  const bubble = row.querySelector('.msg-bubble');
+  const contentDiv = row.querySelector('.msg-content');
+  if (!bubble || !contentDiv) return;
+
+  const actions = document.createElement('div');
+  actions.className = 'msg-actions';
+
+  // Retry
+  const retryBtn = document.createElement('button');
+  retryBtn.className = 'action-btn retry-btn';
+  retryBtn.title = 'Retry';
+  retryBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.5"/></svg> Retry`;
+  retryBtn.addEventListener('click', () => retryLastMessage(row, bubble));
+
+  // Copy
+  const copyBtn = document.createElement('button');
+  copyBtn.className = 'action-btn copy-msg-btn';
+  copyBtn.title = 'Copy message';
+  copyBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 0-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy`;
+  copyBtn.addEventListener('click', () => {
+    navigator.clipboard.writeText(bubble.innerText).then(() => {
+      copyBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg> Copied!`;
+      setTimeout(() => {
+        copyBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 0-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy`;
+      }, 2000);
+    });
+  });
+
+  // TTS
+  const ttsBtn = document.createElement('button');
+  ttsBtn.className = 'action-btn tts-btn';
+  ttsBtn.title = 'Listen';
+  ttsBtn.innerHTML = ttsIconHTML();
+  ttsBtn.addEventListener('click', () => speakText(content, ttsBtn));
+
+  // Share
+  const shareBtn = document.createElement('button');
+  shareBtn.className = 'action-btn share-btn';
+  shareBtn.id = 'share-chat-btn';
+  shareBtn.title = 'Share this chat';
+  shareBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg> Share`;
+  shareBtn.addEventListener('click', shareChat);
+
+  actions.appendChild(retryBtn);
+  actions.appendChild(copyBtn);
+  actions.appendChild(ttsBtn);
+  actions.appendChild(shareBtn);
+
+  // Insert before time div
+  const timeDiv = contentDiv.querySelector('.msg-time');
+  if (timeDiv) contentDiv.insertBefore(actions, timeDiv);
+  else contentDiv.appendChild(actions);
+}
+
+/* ════════════════════════════════════════
    MESSAGE RENDERING
 ════════════════════════════════════════ */
-function appendMessage(role, content, animate = true, imagePreview = null) {
-  const row = createMessageRow(role, content, imagePreview);
+function appendMessage(role, content, animate = true, imagePreview = null, msgIndex = null) {
+  const row = createMessageRow(role, content, imagePreview, msgIndex);
   if (!animate) row.style.animation = 'none';
   messagesList.appendChild(row);
 }
 
-function createMessageRow(role, content, imagePreview = null) {
+function createMessageRow(role, content, imagePreview = null, msgIndex = null) {
   const row = document.createElement('div');
   row.className = `msg-row ${role}`;
 
@@ -1260,7 +1632,9 @@ function createMessageRow(role, content, imagePreview = null) {
       img.src = state.user.avatar; img.alt = state.user.name;
       img.style.cssText = 'width:100%;height:100%;object-fit:cover;border-radius:50%;';
       avatarDiv.appendChild(img); avatarDiv.style.padding = '0'; avatarDiv.style.background = 'none';
-    } else { avatarDiv.textContent = state.user?.name?.charAt(0)?.toUpperCase() || 'U'; }
+    } else {
+      avatarDiv.textContent = state.user?.name?.charAt(0)?.toUpperCase() || 'U';
+    }
   }
 
   const contentDiv = document.createElement('div');
@@ -1297,31 +1671,32 @@ function createMessageRow(role, content, imagePreview = null) {
 
   if (role === 'assistant') {
     addCopyButtons(bubble);
-    const actions = document.createElement('div');
-    actions.className = 'msg-actions';
-    actions.innerHTML = `
-      <button class="action-btn retry-btn" title="Retry">
-        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.5"/></svg> Retry
-      </button>
-      <button class="action-btn copy-msg-btn" title="Copy message">
-        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 0-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy
-      </button>
-      <button class="action-btn share-btn" title="Share this chat" id="share-chat-btn">
-        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg> Share
-      </button>`;
-    actions.querySelector('.retry-btn').addEventListener('click', () => retryLastMessage(row, bubble));
-    actions.querySelector('.copy-msg-btn').addEventListener('click', e => {
-      const btn = e.currentTarget;
-      navigator.clipboard.writeText(bubble.innerText).then(() => {
-        btn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg> Copied!`;
-        setTimeout(() => { btn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 0-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy`; }, 2000);
-      });
-    });
-    contentDiv.appendChild(actions);
+    // Actions wired via wireAssistantActions after streaming
+    // For loaded history messages, wire them now
+    if (typeof content === 'string' && content.length > 0) {
+      wireAssistantActions(row, content, msgIndex);
+    }
+  }
+
+  if (role === 'user') {
+    // Capture msgIndex at render time
+    const capturedIndex = msgIndex !== null ? msgIndex : state.messages.length - 1;
+    const editActions = document.createElement('div');
+    editActions.className = 'msg-actions';
+
+    const editBtn = document.createElement('button');
+    editBtn.className = 'action-btn msg-edit-btn';
+    editBtn.title = 'Edit message';
+    editBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg> Edit`;
+    editBtn.addEventListener('click', () => enableMessageEditing(row, bubble, capturedIndex));
+
+    editActions.appendChild(editBtn);
+    contentDiv.appendChild(editActions);
   }
 
   contentDiv.appendChild(timeDiv);
-  row.appendChild(avatarDiv); row.appendChild(contentDiv);
+  row.appendChild(avatarDiv);
+  row.appendChild(contentDiv);
   return row;
 }
 
