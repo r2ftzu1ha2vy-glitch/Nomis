@@ -8,7 +8,7 @@
    Firebase Auth + Realtime Database
    ============================================================ */
 
-const OPENROUTER_API_KEY = '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';
+const OPENROUTER_API_KEY = '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';
 const MODEL = 'anthropic/claude-3-haiku';
 const APP_URL = window.location.href;
 
@@ -1412,14 +1412,18 @@ async function streamCompletion({ messages, targetBubble, onDone, onError }) {
       model: MODEL,
       messages,
       stream: true,
-      max_tokens: state.isDegraded ? 400 : 2048,
+      max_tokens: state.isDegraded ? 300 : 1024,
       temperature: state.isDegraded ? 0.5 : (state.mode === 'nodex' ? 0.2 : 0.8)
     })
   });
 
   if (!response.ok) {
     const err = await response.json().catch(() => ({}));
-    throw new Error(err.error?.message || `API error ${response.status}`);
+    const msg = err.error?.message || '';
+    if (response.status === 402 || msg.toLowerCase().includes('credits') || msg.toLowerCase().includes('afford')) {
+      throw new Error('Out of OpenRouter credits. Top up at openrouter.ai/settings/credits to continue.');
+    }
+    throw new Error(msg || `API error ${response.status}`);
   }
 
   const reader = response.body.getReader();
@@ -1648,7 +1652,7 @@ async function retryLastMessage(row, bubble) {
       headers: { 'Authorization': `Bearer ${OPENROUTER_API_KEY}`, 'HTTP-Referer': APP_URL, 'X-Title': 'Nomis AI', 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: MODEL, messages, stream: true,
-        max_tokens: state.isDegraded ? 300 : 2048,
+        max_tokens: state.isDegraded ? 300 : 1024,
         temperature: state.isDegraded ? 0.6 : (state.mode === 'nodex' ? 0.5 : 1.0)
       })
     });
