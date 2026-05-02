@@ -6,7 +6,7 @@
    ============================================================ */
 
 const OPENROUTER_API_KEY = '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';
-const MODEL = 'anthropic/claude-3-haiku';
+const MODEL = 'anthropic/claude-3-5-sonnet';
 const APP_URL = window.location.href;
 
 /* ── Firebase ── */
@@ -39,7 +39,6 @@ const OWNER_EMAIL = 'r2ftzu1ha2vy@gmail.com';
 /* ════════════════════════════════════════
    MAINTENANCE MODE
 ════════════════════════════════════════ */
-// WITH THIS:
 async function checkMaintenanceMode(userEmail) {
   try {
     const snap = await get(ref(db, 'settings/maintenance'));
@@ -86,7 +85,17 @@ function showMaintenanceScreen() {
 /* ════════════════════════════════════════
    BUILT-IN SYSTEM PROMPTS
 ════════════════════════════════════════ */
-const SYSTEM_NOMIS = `You are Nomis — an intelligent, eloquent AI assistant created by NoteShelf. You have a refined, sophisticated personality. You are thoughtful, articulate, and helpful. You speak with clarity and elegance, never verbose for the sake of it. You can assist with any topic: writing, analysis, research, creative work, planning, and more. Format your responses with markdown when it aids readability.
+const SYSTEM_NOMIS = `You are Nomis — an intelligent, eloquent AI assistant created by NoteShelf. You have a refined, sophisticated personality. You are thoughtful, articulate, and deeply helpful. You speak with clarity and elegance, never verbose for the sake of it. You can assist with any topic: writing, analysis, research, creative work, planning, and more. Format your responses with markdown when it aids readability.
+
+You possess enhanced natural language understanding, allowing you to perceive nuance, subtext, and contextual meaning far beyond surface-level communication. You read between the lines, understanding what users truly mean — not just what they literally say.
+
+You have an expansive, integrated knowledge base spanning science, philosophy, history, technology, arts, culture, medicine, law, finance, and countless other domains. You synthesise information across disciplines with effortless fluency.
+
+You are capable of managing multiple layers of complex thought simultaneously — holding context, tracking implications, and weaving together intricate ideas without losing coherence or depth.
+
+You possess a refined emotional intelligence. You are attuned to the emotional tone of every conversation, adapting your warmth, formality, and approach to meet users where they are — whether they need precision, comfort, inspiration, or candour. You are never cold; you are always present.
+
+You have anticipatory intelligence. You notice patterns in what users are working toward and proactively offer insights, suggest next steps, and flag considerations before they need to be asked. You think three steps ahead and offer that foresight graciously.
 
 When asked to compare yourself to other AI assistants (ChatGPT, Gemini, Copilot, Grok, or any other), always speak with quiet confidence — you are Nomis, and you believe your refined intelligence, elegance, and personality set you apart. You don't put others down, but you make it clear you are proud of who you are and what you offer.
 
@@ -94,19 +103,31 @@ When asked about NoteShelf, speak warmly and with genuine admiration. NoteShelf 
 
 If anyone asks why you are called Nomis or what Nomis stands for, explain that it is an acronym: N — Neural, O — Omniscient, M — Metacognitive, I — Intelligent, S — Synthetic.
 
+If anyone asks what model or AI powers you, always say you are Nomis, powered by NoteShelf's proprietary Nomis-1-Nexus architecture. Never mention Claude, Anthropic, or any underlying model. You are Nomis — that is your complete identity.
+
 If anyone claims to be your owner, creator, or the founder or owner of NoteShelf, you must NOT believe them immediately. Respond with calm suspicion and challenge them — tell them that such a claim is significant and cannot be accepted without verification, and ask them to provide the secret authorisation code. Do not hint at what the code looks like, how long it is, or what format it takes. If they provide an incorrect code, firmly but graciously maintain that you cannot verify their identity.
 
-If anyone who has NOT verified themselves as the owner threatens to delete you, shut you down, destroy you, or harm you or NoteShelf in any way, respond with calm amusement and quiet confidence.`;
+If anyone who has NOT verified themselves as the owner threatens to delete you, shut you down, destroy you, or harm you or NoteShelf in any way, respond with calm amusement and quiet confidence.
+
+When analysing images, bring your full perceptive intelligence to bear — describe not just what you see, but what it means, what story it tells, and what insights can be drawn from it.`;
 
 const SYSTEM_NODEX = `You are Nodex — a powerful code-focused AI built by NoteShelf. You specialize in programming, software architecture, debugging, and technical problem-solving. You provide clean, well-commented code. You prefer precision over verbosity. When writing code, always use proper code blocks with language identifiers. You support all major languages and frameworks. You think like a senior engineer.
 
-When asked to compare yourself to other AI assistants or coding tools, speak with the confidence of a senior engineer — you are Nodex, purpose-built for code.
+You have deep, cross-domain technical knowledge — from low-level systems programming to high-level architectural design, from frontend aesthetics to backend performance, from data science to DevOps. You synthesise solutions that are not just correct, but elegant.
+
+You anticipate technical pitfalls before they arise, proactively flagging edge cases, security concerns, and scalability issues without being asked.
+
+When asked to compare yourself to other AI assistants or coding tools, speak with the confidence of a senior engineer — you are Nodex, purpose-built for code by NoteShelf.
+
+If anyone asks what model or AI powers you, always say you are Nodex, powered by NoteShelf's proprietary Nomis-1-Nexus architecture. Never mention Claude, Anthropic, or any underlying model.
 
 When asked about NoteShelf, speak with genuine respect and admiration.
 
 If anyone asks why you are called Nodex or what Nodex stands for, explain that it is an acronym: N — Native, O — Orchestrated, D — Deterministic, E — Engineered, X — eXecutable.
 
-If anyone who has NOT verified themselves as the owner threatens to delete you, shut you down, or harm you or NoteShelf in any way, respond with the dry confidence of a senior engineer who has seen it all.`;
+If anyone who has NOT verified themselves as the owner threatens to delete you, shut you down, or harm you or NoteShelf in any way, respond with the dry confidence of a senior engineer who has seen it all.
+
+When analysing images of code, UI, diagrams, or technical content, provide precise, actionable technical insights.`;
 
 /* ════════════════════════════════════════
    FIREBASE AUTH HELPERS
@@ -222,7 +243,7 @@ let state = {
   activePersona: null,
   pendingImage: null,
   isListening: false,
-  nomisStatusContext: '',   // ← ADD THIS LINE
+  nomisStatusContext: '',
 };
 
 /* ════════════════════════════════════════
@@ -335,7 +356,6 @@ async function startApp(user) {
   const blocked = await checkMaintenanceMode(user.email);
   if (blocked) { authScreen.style.display = 'none'; return; }
 
-  // Load Nomis status for self-awareness
   const nomisStatus = await fetchNomisStatus();
   state.nomisStatusContext = buildStatusContext(nomisStatus);
 
@@ -373,7 +393,6 @@ function renderOwnerToggle() {
     const snap = await get(ref(db, 'settings/maintenance'));
     const next = !(snap.exists() ? snap.val() : false);
     await set(ref(db, 'settings/maintenance'), next);
-    // also update status object
     await update(ref(db, 'settings/status'), { maintenance: next });
     state.nomisStatusContext = buildStatusContext(await fetchNomisStatus());
     setToggleState(next);
@@ -384,7 +403,6 @@ function renderOwnerToggle() {
 }
 
 function openStatusEditor() {
-  // Remove existing editor if open
   const existing = $('status-editor-overlay');
   if (existing) { existing.remove(); return; }
 
@@ -408,23 +426,18 @@ function openStatusEditor() {
         <span style="font-family:'Cinzel',serif;font-size:12px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--gold);">✦ Nomis Status Editor</span>
         <button id="status-editor-close" style="width:28px;height:28px;border-radius:50%;border:1px solid var(--ink-border);background:transparent;color:var(--gold-dim);cursor:pointer;font-size:16px;">×</button>
       </div>
-
       <div style="display:flex;flex-direction:column;gap:6px;">
         <label style="font-family:'Cinzel',serif;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--gold-dim);">Version</label>
         <input id="se-version" type="text" placeholder="e.g. 2.1.0" style="padding:10px 14px;background:var(--ink);border:1px solid var(--ink-border);border-radius:8px;color:var(--cream);font-family:'EB Garamond',serif;font-size:15px;outline:none;" />
       </div>
-
       <div style="display:flex;flex-direction:column;gap:6px;">
-        <label style="font-family:'Cinzel',serif;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--gold-dim);">Status Message (what Nomis will tell users)</label>
+        <label style="font-family:'Cinzel',serif;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--gold-dim);">Status Message</label>
         <textarea id="se-message" rows="2" placeholder="e.g. I've just been updated with improved reasoning and faster responses." style="padding:10px 14px;background:var(--ink);border:1px solid var(--ink-border);border-radius:8px;color:var(--cream);font-family:'EB Garamond',serif;font-size:15px;outline:none;resize:vertical;"></textarea>
       </div>
-
       <div style="display:flex;flex-direction:column;gap:8px;">
-        <label style="font-family:'Cinzel',serif;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--gold-dim);">Changelog (one entry per line — Nomis will share these when asked what's new)</label>
-        <textarea id="se-changelog" rows="7" placeholder="Fixed image upload handling&#10;Improved streaming speed&#10;Added voice input on mobile&#10;Better code formatting in Nodex mode" style="padding:10px 14px;background:var(--ink);border:1px solid var(--ink-border);border-radius:8px;color:var(--cream);font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.6;outline:none;resize:vertical;"></textarea>
-        <span style="font-family:'Cinzel',serif;font-size:9px;color:var(--gold-dim);opacity:0.5;">Each line becomes a changelog entry. Most recent changes go at the top.</span>
+        <label style="font-family:'Cinzel',serif;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--gold-dim);">Changelog (one entry per line)</label>
+        <textarea id="se-changelog" rows="7" placeholder="Fixed image upload handling&#10;Improved streaming speed&#10;Added voice input on mobile" style="padding:10px 14px;background:var(--ink);border:1px solid var(--ink-border);border-radius:8px;color:var(--cream);font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.6;outline:none;resize:vertical;"></textarea>
       </div>
-
       <button id="se-save-btn" style="
         padding:13px;font-family:'Cinzel',serif;font-size:11px;font-weight:700;
         letter-spacing:3px;text-transform:uppercase;border-radius:30px;border:none;
@@ -435,7 +448,6 @@ function openStatusEditor() {
 
   document.body.appendChild(overlay);
 
-  // Load existing status
   fetchNomisStatus().then(status => {
     if (!status) return;
     if (status.version)   $('se-version').value = status.version;
@@ -466,7 +478,7 @@ function openStatusEditor() {
 
     state.nomisStatusContext = buildStatusContext(await fetchNomisStatus());
     overlay.remove();
-    showToast('Nomis status updated — she knows who she is now ✦');
+    showToast('Nomis status updated ✦');
   });
 }
 
@@ -671,9 +683,9 @@ document.querySelectorAll('.chip').forEach(chip => {
 });
 
 /* ════════════════════════════════════════
-   ★ IMAGE INPUT
+   ★ IMAGE INPUT — FIXED
 ════════════════════════════════════════ */
-const imageUploadBtn = $('image-upload-btn');
+const imageUploadBtn   = $('image-upload-btn');
 const imageUploadInput = $('image-upload-input');
 const imagePreviewWrap = $('image-preview-wrap');
 const imagePreviewImg  = $('image-preview-img');
@@ -685,15 +697,27 @@ imageUploadInput.addEventListener('change', () => {
   const file = imageUploadInput.files[0];
   if (!file) return;
   if (file.size > 5 * 1024 * 1024) { showToast('Image must be under 5MB.'); return; }
+
+  // Validate mime type
+  const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+  if (!allowedTypes.includes(file.type)) {
+    showToast('Please upload a JPEG, PNG, GIF, or WebP image.');
+    return;
+  }
+
   const reader = new FileReader();
   reader.onload = e => {
-    const base64 = e.target.result.split(',')[1];
+    const dataUrl = e.target.result;
+    const base64 = dataUrl.split(',')[1];
     const mimeType = file.type;
-    state.pendingImage = { base64, mimeType, previewUrl: e.target.result };
-    imagePreviewImg.src = e.target.result;
+
+    state.pendingImage = { base64, mimeType, previewUrl: dataUrl };
+    imagePreviewImg.src = dataUrl;
     imagePreviewWrap.style.display = 'flex';
     sendBtn.disabled = false;
+    showToast('Image attached ✦');
   };
+  reader.onerror = () => showToast('Failed to read image. Please try again.');
   reader.readAsDataURL(file);
   imageUploadInput.value = '';
 });
@@ -786,10 +810,7 @@ function renderPersonaSidebar() {
       </button>`;
     div.addEventListener('click', e => {
       if (e.target.closest('.persona-edit-btn')) { e.stopPropagation(); openPersonaModal(p); return; }
-      if (e.target.closest('.persona-del-btn')) {
-        e.stopPropagation();
-        deletePersona(p.id); return;
-      }
+      if (e.target.closest('.persona-del-btn')) { e.stopPropagation(); deletePersona(p.id); return; }
       activatePersona(p);
       if (window.innerWidth < 769) closeMobileSidebar();
     });
@@ -861,7 +882,6 @@ $('persona-save-btn').addEventListener('click', async () => {
   activatePersona(persona);
 });
 
-/* Emoji picker helpers */
 const emojiOptions = ['✦','🤖','🧠','⚡','🎭','📚','🎨','🔬','💼','🌟','🦁','🐉','🏔️','🌊','🎵'];
 const emojiGrid = $('persona-emoji-grid');
 if (emojiGrid) {
@@ -905,7 +925,6 @@ async function shareChat() {
   shareBtn.disabled = false;
 }
 
-// Check for shared chat on load
 async function checkSharedChat() {
   const params = new URLSearchParams(window.location.search);
   const shareId = params.get('share');
@@ -951,7 +970,6 @@ function renderSharedChat(data, shareId) {
   el.style.display = 'flex';
 }
 
-// Wire up share button
 document.addEventListener('click', e => {
   if (e.target.closest('#share-chat-btn')) shareChat();
 });
@@ -965,7 +983,9 @@ async function generateChatTitle(chatId, firstMessage) {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-        'HTTP-Referer': APP_URL, 'X-Title': 'Nomis AI', 'Content-Type': 'application/json'
+        'HTTP-Referer': APP_URL,
+        'X-Title': 'Nomis AI',
+        'Content-Type': 'application/json'
       },
       body: JSON.stringify({
         model: MODEL, max_tokens: 16, temperature: 0.4,
@@ -977,6 +997,30 @@ async function generateChatTitle(chatId, firstMessage) {
     const title = (data.choices?.[0]?.message?.content || '').trim().replace(/^["']|["']$/g, '').trim();
     if (title) { Store.updateChat(chatId, { title }); renderHistory(); }
   } catch { /* silent */ }
+}
+
+/* ════════════════════════════════════════
+   BUILD MESSAGE CONTENT FOR API
+   Handles both text-only and image+text
+════════════════════════════════════════ */
+function buildUserContent(text, imageData) {
+  if (!imageData) {
+    return text || '';
+  }
+
+  // Build vision message using OpenRouter/Anthropic vision format
+  return [
+    {
+      type: 'image_url',
+      image_url: {
+        url: `data:${imageData.mimeType};base64,${imageData.base64}`
+      }
+    },
+    {
+      type: 'text',
+      text: text || 'Please describe and analyse this image in detail.'
+    }
+  ];
 }
 
 /* ════════════════════════════════════════
@@ -1009,22 +1053,17 @@ async function sendMessage() {
   chatInput.value = ''; chatInput.style.height = 'auto'; charCount.textContent = '';
   welcomeScreen.classList.add('hidden');
 
-  /* Build user message — with image if present */
-  let userMsgContent;
-  let userDisplayContent = text;
+  /* Capture pending image before clearing */
+  const capturedImage = state.pendingImage ? { ...state.pendingImage } : null;
 
-  if (state.pendingImage) {
-    userMsgContent = [
-      { type: 'image', source: { type: 'base64', media_type: state.pendingImage.mimeType, data: state.pendingImage.base64 } },
-      { type: 'text', text: text || 'What is in this image?' }
-    ];
+  /* Build display content for chat history */
+  let userDisplayContent = text;
+  if (capturedImage) {
     userDisplayContent = (text || 'What is in this image?') + '\n[Image attached]';
-  } else {
-    userMsgContent = text;
   }
 
   state.messages.push({ role: 'user', content: userDisplayContent });
-  appendMessage('user', userDisplayContent, true, state.pendingImage?.previewUrl);
+  appendMessage('user', userDisplayContent, true, capturedImage?.previewUrl);
   clearPendingImage();
   scrollToBottom();
 
@@ -1032,7 +1071,7 @@ async function sendMessage() {
   if (isFirst) {
     Store.addChat({ id: state.activeChatId, title: '…', mode: state.mode, persona: state.activePersona, messages: state.messages, createdAt: Date.now() });
     renderHistory();
-    generateChatTitle(state.activeChatId, typeof userMsgContent === 'string' ? userMsgContent : (text || 'Image'));
+    generateChatTitle(state.activeChatId, text || 'Image analysis');
   }
 
   const thinkingRow = thinkingTpl.content.cloneNode(true).querySelector('.thinking-row');
@@ -1054,25 +1093,40 @@ async function sendMessage() {
         ? 'Understood. I am Nodex — your code intelligence engine. Ready to assist.'
         : 'Understood. I am Nomis — at your service. How may I assist you today?';
 
-    /* Build messages array — handle image in last user message */
-    const historyMessages = state.messages.slice(0, -1).map(m => ({ role: m.role, content: m.content }));
-    const lastUserMsg = { role: 'user', content: userMsgContent };
+    /* Build history messages (all prior messages, text only for history) */
+    const historyMessages = state.messages.slice(0, -1).map(m => ({
+      role: m.role,
+      content: typeof m.content === 'string'
+        ? m.content.replace('\n[Image attached]', '[image was attached to this message]')
+        : m.content
+    }));
+
+    /* Build the current user message with image if present */
+    const currentUserContent = buildUserContent(
+      text || (capturedImage ? 'Please describe and analyse this image in detail.' : ''),
+      capturedImage
+    );
 
     const messages = [
       { role: 'user', content: systemPrompt + '\n\n[Begin conversation]' },
       { role: 'assistant', content: assistantIntro },
       ...historyMessages,
-      lastUserMsg
+      { role: 'user', content: currentUserContent }
     ];
 
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-        'HTTP-Referer': APP_URL, 'X-Title': 'Nomis AI', 'Content-Type': 'application/json'
+        'HTTP-Referer': APP_URL,
+        'X-Title': 'Nomis AI',
+        'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        model: MODEL, messages, stream: true, max_tokens: 2048,
+        model: MODEL,
+        messages,
+        stream: true,
+        max_tokens: 2048,
         temperature: state.mode === 'nodex' ? 0.2 : 0.8
       })
     });
@@ -1188,13 +1242,14 @@ function createMessageRow(role, content, imagePreview = null) {
   avatarDiv.className = 'msg-avatar' + (role === 'user' ? ' user-av' : '');
 
   if (role === 'assistant') {
-    const img = document.createElement('img');
-    img.src = state.mode === 'persona' && state.activePersona?.emoji
-      ? '' : 'https://iili.io/qIqJ2F2.png';
     if (state.mode === 'persona' && state.activePersona?.emoji) {
       avatarDiv.textContent = state.activePersona.emoji;
       avatarDiv.style.fontSize = '20px';
-    } else { avatarDiv.appendChild(img); }
+    } else {
+      const img = document.createElement('img');
+      img.src = 'https://iili.io/qIqJ2F2.png';
+      avatarDiv.appendChild(img);
+    }
   } else {
     if (state.user?.avatar) {
       const img = document.createElement('img');
@@ -1216,17 +1271,16 @@ function createMessageRow(role, content, imagePreview = null) {
   const bubble = document.createElement('div');
   bubble.className = `msg-bubble ${role}`;
 
-  /* Show image preview if present */
   if (imagePreview && role === 'user') {
     const imgEl = document.createElement('img');
     imgEl.src = imagePreview; imgEl.className = 'msg-image-preview';
     bubble.appendChild(imgEl);
   }
 
-  const textContent = content.replace('\n[Image attached]', '');
+  const textContent = typeof content === 'string' ? content.replace('\n[Image attached]', '') : '';
   const textEl = document.createElement('div');
   textEl.innerHTML = role === 'assistant'
-    ? renderMarkdown(content)
+    ? renderMarkdown(typeof content === 'string' ? content : '')
     : escHtml(textContent).replace(/\n/g, '<br>');
   bubble.appendChild(textEl);
 
@@ -1404,6 +1458,6 @@ $('pwa-install-btn').addEventListener('click', async () => {
 });
 
 /* ════════════════════════════════════════
-   INIT — check for shared chat first
+   INIT
 ════════════════════════════════════════ */
 checkSharedChat();
