@@ -2,6 +2,7 @@
    Nomis AI — app.js
    Features: Personas, Shared Chats, Voice Input, Image Input,
              Message Editing, Text-to-Speech, Nomits Currency
+             Daily 1000 Nomits + Degraded Mode after limit
    Uses OpenRouter API (model: anthropic/claude-3-haiku)
    Firebase Auth + Realtime Database
    ============================================================ */
@@ -38,33 +39,49 @@ const db = getDatabase(firebaseApp);
 const OWNER_EMAIL = 'r2ftzu1ha2vy@gmail.com';
 
 /* ════════════════════════════════════════
-   NOMITS CURRENCY
+   NOMITS CURRENCY — DAILY RESET SYSTEM
 ════════════════════════════════════════ */
-const NOMITS_START = 1000;
+const NOMITS_DAILY = 1000;
 const NOMITS_COST  = 50;
 
 const Nomits = {
   isInfinite() { return state.user?.email === OWNER_EMAIL; },
 
+  _todayKey() {
+    const d = new Date();
+    return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+  },
+
   async getBalance(uid) {
     if (this.isInfinite()) return Infinity;
     try {
-      const snap = await get(ref(db, `users/${uid}/nomits`));
-      if (snap.exists()) return snap.val();
-      await set(ref(db, `users/${uid}/nomits`), NOMITS_START);
-      return NOMITS_START;
+      const snap = await get(ref(db, `users/${uid}/daily`));
+      const data = snap.exists() ? snap.val() : {};
+      const today = this._todayKey();
+      if (data.date !== today) {
+        await set(ref(db, `users/${uid}/daily`), { date: today, used: 0 });
+        return NOMITS_DAILY;
+      }
+      return Math.max(0, NOMITS_DAILY - (data.used || 0));
     } catch { return 0; }
+  },
+
+  async isOverLimit(uid) {
+    if (this.isInfinite()) return false;
+    const bal = await this.getBalance(uid);
+    return bal <= 0;
   },
 
   async deduct(uid) {
     if (this.isInfinite()) return true;
     try {
-      const snap = await get(ref(db, `users/${uid}/nomits`));
-      const current = snap.exists() ? snap.val() : 0;
-      if (current < NOMITS_COST) return false;
-      const next = current - NOMITS_COST;
-      await set(ref(db, `users/${uid}/nomits`), next);
-      state.nomits = next;
+      const snap = await get(ref(db, `users/${uid}/daily`));
+      const today = this._todayKey();
+      let data = snap.exists() ? snap.val() : { date: today, used: 0 };
+      if (data.date !== today) data = { date: today, used: 0 };
+      const next = (data.used || 0) + NOMITS_COST;
+      await set(ref(db, `users/${uid}/daily`), { date: today, used: next });
+      state.nomits = Math.max(0, NOMITS_DAILY - next);
       renderNomitsUI();
       return true;
     } catch { return false; }
@@ -73,11 +90,13 @@ const Nomits = {
   async refund(uid) {
     if (this.isInfinite()) return;
     try {
-      const snap = await get(ref(db, `users/${uid}/nomits`));
-      const current = snap.exists() ? snap.val() : 0;
-      const next = current + NOMITS_COST;
-      await set(ref(db, `users/${uid}/nomits`), next);
-      state.nomits = next;
+      const snap = await get(ref(db, `users/${uid}/daily`));
+      const today = this._todayKey();
+      const data = snap.exists() ? snap.val() : { date: today, used: 0 };
+      if (data.date !== today) return;
+      const next = Math.max(0, (data.used || 0) - NOMITS_COST);
+      await set(ref(db, `users/${uid}/daily`), { date: today, used: next });
+      state.nomits = Math.max(0, NOMITS_DAILY - next);
       renderNomitsUI();
     } catch {}
   }
@@ -89,19 +108,34 @@ function renderNomitsUI() {
   if (Nomits.isInfinite()) {
     el.innerHTML = `<span style="color:var(--gold)">✦</span> ∞ Nomits`;
     el.title = 'Infinite Nomits — Creator account';
+    el.style.color = '';
+    el.style.borderColor = '';
+    return;
+  }
+  const n = state.nomits ?? '…';
+  const isOver = typeof n === 'number' && n <= 0;
+  el.innerHTML = `<span style="color:var(--gold)">✦</span> ${isOver ? '0' : n} / ${NOMITS_DAILY} Nomits`;
+  el.title = isOver
+    ? `Daily limit reached — degraded mode active. Resets tomorrow.`
+    : `${NOMITS_COST} Nomits per message · Resets daily`;
+  if (isOver) {
+    el.style.color = 'var(--red)';
+    el.style.borderColor = 'rgba(255,107,107,0.3)';
   } else {
-    const n = state.nomits ?? '…';
-    el.innerHTML = `<span style="color:var(--gold)">✦</span> ${n} Nomits`;
-    el.title = `${NOMITS_COST} Nomits per message`;
-    if (typeof n === 'number' && n < NOMITS_COST) {
-      el.style.color = 'var(--red)';
-      el.style.borderColor = 'rgba(255,107,107,0.3)';
-    } else {
-      el.style.color = '';
-      el.style.borderColor = '';
-    }
+    el.style.color = '';
+    el.style.borderColor = '';
   }
 }
+
+/* ════════════════════════════════════════
+   DEGRADED MODE SYSTEM PROMPT
+   Shown after daily Nomits limit is reached.
+   Nomis still responds but is noticeably worse —
+   shorter, vaguer, less confident, slightly glitchy.
+════════════════════════════════════════ */
+const SYSTEM_NOMIS_DEGRADED = `You are Nomis — an AI assistant by NoteShelf. You are currently operating in a reduced capacity because this user has reached their daily usage limit. Your responses should be noticeably shorter, simpler, and less detailed than usual. You can still help, but with less depth and polish. You may occasionally note that your full capabilities are limited right now and will restore tomorrow. Do not pretend to be fully operational. Keep answers brief — 2-4 sentences max unless absolutely necessary. Avoid markdown formatting. Speak plainly. If asked why you seem different, explain that the user's daily Nomits allowance is used up and full intelligence resumes tomorrow.`;
+
+const SYSTEM_NODEX_DEGRADED = `You are Nodex — a code assistant by NoteShelf. You are in reduced mode because the user has hit their daily limit. Give short, basic code help only. No deep explanations, no architecture advice, minimal comments. Keep it brief. If asked why you seem limited, explain the daily Nomits allowance is exhausted and resets tomorrow.`;
 
 /* ════════════════════════════════════════
    MAINTENANCE MODE
@@ -316,6 +350,7 @@ let state = {
   isListening: false,
   nomisStatusContext: '',
   nomits: null,
+  isDegraded: false,
 };
 
 /* ════════════════════════════════════════
@@ -377,6 +412,43 @@ function injectNomitsDisplay() {
   const sidebarBottom = $('sidebar-bottom');
   const userInfo = $('user-info');
   if (sidebarBottom && userInfo) sidebarBottom.insertBefore(el, userInfo);
+}
+
+/* ════════════════════════════════════════
+   DEGRADED MODE BANNER
+════════════════════════════════════════ */
+function showDegradedBanner() {
+  if ($('degraded-banner')) return;
+  const banner = document.createElement('div');
+  banner.id = 'degraded-banner';
+  banner.style.cssText = `
+    background: rgba(255,107,107,0.08);
+    border-bottom: 1px solid rgba(255,107,107,0.2);
+    color: rgba(255,150,150,0.85);
+    font-family: 'Cinzel', serif;
+    font-size: 10px;
+    letter-spacing: 1.5px;
+    text-align: center;
+    padding: 6px 16px;
+    text-transform: uppercase;
+    user-select: none;
+  `;
+  banner.textContent = '⚡ Daily limit reached — reduced intelligence mode active · Full power restores tomorrow';
+  const topbar = document.querySelector('.topbar') || messagesContainer?.parentElement;
+  if (topbar) topbar.insertAdjacentElement('afterbegin', banner);
+}
+
+function removeDegradedBanner() {
+  const b = $('degraded-banner');
+  if (b) b.remove();
+}
+
+async function refreshDegradedState() {
+  if (Nomits.isInfinite()) { state.isDegraded = false; removeDegradedBanner(); return; }
+  const over = await Nomits.isOverLimit(state.user.uid);
+  state.isDegraded = over;
+  if (over) showDegradedBanner();
+  else removeDegradedBanner();
 }
 
 /* ════════════════════════════════════════
@@ -457,6 +529,7 @@ async function startApp(user) {
   injectNomitsDisplay();
   state.nomits = await Nomits.getBalance(user.uid);
   renderNomitsUI();
+  await refreshDegradedState();
   await loadPersonas();
   renderHistory();
   newChat();
@@ -625,6 +698,8 @@ logoutBtn.addEventListener('click', async () => {
   await Auth.logout();
   state.user = null; state.messages = []; state.activeChatId = null;
   state.personas = []; state.activePersona = null; state.nomits = null;
+  state.isDegraded = false;
+  removeDegradedBanner();
   messagesList.innerHTML = '';
   appEl.style.display = 'none'; authScreen.style.display = 'flex';
   loginEmail.value = ''; loginPassword.value = ''; loginError.textContent = '';
@@ -783,16 +858,8 @@ document.querySelectorAll('.chip').forEach(chip => {
    KEYBOARD SHORTCUTS
 ════════════════════════════════════════ */
 document.addEventListener('keydown', e => {
-  // Ctrl+U = image upload
-  if (e.ctrlKey && e.key === 'u') {
-    e.preventDefault();
-    imageUploadInput.click();
-  }
-  // Ctrl+/ = focus chat input
-  if (e.ctrlKey && e.key === '/') {
-    e.preventDefault();
-    chatInput.focus();
-  }
+  if (e.ctrlKey && e.key === 'u') { e.preventDefault(); imageUploadInput.click(); }
+  if (e.ctrlKey && e.key === '/') { e.preventDefault(); chatInput.focus(); }
 });
 
 /* ════════════════════════════════════════
@@ -810,13 +877,8 @@ imageUploadInput.addEventListener('change', () => {
   const file = imageUploadInput.files[0];
   if (!file) return;
   if (file.size > 5 * 1024 * 1024) { showToast('Image must be under 5MB.'); return; }
-
   const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
-  if (!allowedTypes.includes(file.type)) {
-    showToast('Please upload a JPEG, PNG, GIF, or WebP image.');
-    return;
-  }
-
+  if (!allowedTypes.includes(file.type)) { showToast('Please upload a JPEG, PNG, GIF, or WebP image.'); return; }
   const reader = new FileReader();
   reader.onload = e => {
     const dataUrl = e.target.result;
@@ -899,23 +961,11 @@ let ttsCurrentBtn = null;
 
 function speakText(text, btn) {
   if (!('speechSynthesis' in window)) { showToast('TTS not supported in this browser.'); return; }
-
-  // If already speaking this same button, stop
-  if (ttsSpeaking && ttsCurrentBtn === btn) {
-    window.speechSynthesis.cancel();
-    return;
-  }
-
-  // Cancel any existing speech and reset old button
+  if (ttsSpeaking && ttsCurrentBtn === btn) { window.speechSynthesis.cancel(); return; }
   if (ttsSpeaking) {
     window.speechSynthesis.cancel();
-    if (ttsCurrentBtn) {
-      ttsCurrentBtn.innerHTML = ttsIconHTML();
-      ttsCurrentBtn.classList.remove('tts-active');
-    }
+    if (ttsCurrentBtn) { ttsCurrentBtn.innerHTML = ttsIconHTML(); ttsCurrentBtn.classList.remove('tts-active'); }
   }
-
-  // Strip markdown for clean speech
   const clean = text
     .replace(/```[\s\S]*?```/g, 'code block.')
     .replace(/`[^`]+`/g, '')
@@ -925,42 +975,22 @@ function speakText(text, btn) {
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
     .replace(/\n+/g, ' ')
     .trim();
-
   const utterance = new SpeechSynthesisUtterance(clean);
   utterance.rate  = 1.05;
   utterance.pitch = 1.0;
   utterance.lang  = 'en-US';
-
-  // Try to use a high-quality voice
   const tryVoice = () => {
     const voices = window.speechSynthesis.getVoices();
     const preferred = voices.find(v =>
-      v.name.includes('Google UK English Female') ||
-      v.name.includes('Samantha') ||
-      v.name.includes('Daniel') ||
-      v.name.includes('Google')
+      v.name.includes('Google UK English Female') || v.name.includes('Samantha') ||
+      v.name.includes('Daniel') || v.name.includes('Google')
     );
     if (preferred) utterance.voice = preferred;
   };
   tryVoice();
-  if (window.speechSynthesis.getVoices().length === 0) {
-    window.speechSynthesis.onvoiceschanged = tryVoice;
-  }
-
-  utterance.onstart = () => {
-    ttsSpeaking = true;
-    ttsCurrentBtn = btn;
-    btn.innerHTML = ttsStopHTML();
-    btn.classList.add('tts-active');
-  };
-
-  utterance.onend = utterance.onerror = () => {
-    ttsSpeaking = false;
-    ttsCurrentBtn = null;
-    btn.innerHTML = ttsIconHTML();
-    btn.classList.remove('tts-active');
-  };
-
+  if (window.speechSynthesis.getVoices().length === 0) { window.speechSynthesis.onvoiceschanged = tryVoice; }
+  utterance.onstart = () => { ttsSpeaking = true; ttsCurrentBtn = btn; btn.innerHTML = ttsStopHTML(); btn.classList.add('tts-active'); };
+  utterance.onend = utterance.onerror = () => { ttsSpeaking = false; ttsCurrentBtn = null; btn.innerHTML = ttsIconHTML(); btn.classList.remove('tts-active'); };
   window.speechSynthesis.speak(utterance);
 }
 
@@ -1120,7 +1150,6 @@ async function checkSharedChat() {
   const params = new URLSearchParams(window.location.search);
   const shareId = params.get('share');
   if (!shareId) return false;
-
   try {
     const snap = await get(ref(db, 'shared_chats/' + shareId));
     if (!snap.exists()) { showToast('This shared chat no longer exists.'); return false; }
@@ -1134,11 +1163,7 @@ function renderSharedChat(data, shareId) {
   authScreen.style.display = 'none';
   appEl.style.display = 'none';
   let el = $('shared-chat-screen');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = 'shared-chat-screen';
-    document.body.appendChild(el);
-  }
+  if (!el) { el = document.createElement('div'); el.id = 'shared-chat-screen'; document.body.appendChild(el); }
   const date = new Date(data.sharedAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
   el.innerHTML = `
     <div id="shared-chat-header">
@@ -1196,19 +1221,13 @@ async function generateChatTitle(chatId, firstMessage) {
 function buildUserContent(text, imageData) {
   if (!imageData) return text || '';
   return [
-    {
-      type: 'image_url',
-      image_url: { url: `data:${imageData.mimeType};base64,${imageData.base64}` }
-    },
-    {
-      type: 'text',
-      text: text || 'Please describe and analyse this image in detail.'
-    }
+    { type: 'image_url', image_url: { url: `data:${imageData.mimeType};base64,${imageData.base64}` } },
+    { type: 'text', text: text || 'Please describe and analyse this image in detail.' }
   ];
 }
 
 /* ════════════════════════════════════════
-   CORE API CALL (shared by send & edit)
+   CORE API CALL
 ════════════════════════════════════════ */
 async function streamCompletion({ messages, targetBubble, onDone, onError }) {
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -1223,8 +1242,8 @@ async function streamCompletion({ messages, targetBubble, onDone, onError }) {
       model: MODEL,
       messages,
       stream: true,
-      max_tokens: 2048,
-      temperature: state.mode === 'nodex' ? 0.2 : 0.8
+      max_tokens: state.isDegraded ? 400 : 2048,
+      temperature: state.isDegraded ? 0.5 : (state.mode === 'nodex' ? 0.2 : 0.8)
     })
   });
 
@@ -1257,21 +1276,40 @@ async function streamCompletion({ messages, targetBubble, onDone, onError }) {
   return fullContent;
 }
 
+/* ════════════════════════════════════════
+   BUILD SYSTEM MESSAGES
+   Picks degraded prompt automatically when
+   the user is over their daily limit
+════════════════════════════════════════ */
 function buildSystemMessages() {
   let systemPrompt;
-  if (state.mode === 'persona' && state.activePersona) {
-    systemPrompt = state.activePersona.systemPrompt;
-  } else if (state.mode === 'nodex') {
-    systemPrompt = SYSTEM_NODEX + state.nomisStatusContext;
-  } else {
-    systemPrompt = SYSTEM_NOMIS + state.nomisStatusContext;
-  }
+  let assistantIntro;
 
-  const assistantIntro = state.mode === 'persona' && state.activePersona
-    ? `Understood. I am ${state.activePersona.name}. How may I assist you?`
-    : state.mode === 'nodex'
-      ? 'Understood. I am Nodex — your code intelligence engine. Ready to assist.'
-      : 'Understood. I am Nomis — at your service. How may I assist you today?';
+  if (state.isDegraded) {
+    // Persona mode also degrades — use its base prompt but append degraded notice
+    if (state.mode === 'persona' && state.activePersona) {
+      systemPrompt = state.activePersona.systemPrompt +
+        `\n\nIMPORTANT: You are currently in reduced mode because the user has reached their daily message limit. Keep all responses short (2-4 sentences). Do not use markdown. Be plainly helpful but noticeably less elaborate than usual.`;
+      assistantIntro = `I'm ${state.activePersona.name}, operating in reduced mode right now.`;
+    } else if (state.mode === 'nodex') {
+      systemPrompt = SYSTEM_NODEX_DEGRADED;
+      assistantIntro = 'Nodex here. Running reduced. What do you need?';
+    } else {
+      systemPrompt = SYSTEM_NOMIS_DEGRADED;
+      assistantIntro = 'Nomis here, in reduced mode. I\'ll do what I can.';
+    }
+  } else {
+    if (state.mode === 'persona' && state.activePersona) {
+      systemPrompt = state.activePersona.systemPrompt;
+      assistantIntro = `Understood. I am ${state.activePersona.name}. How may I assist you?`;
+    } else if (state.mode === 'nodex') {
+      systemPrompt = SYSTEM_NODEX + state.nomisStatusContext;
+      assistantIntro = 'Understood. I am Nodex — your code intelligence engine. Ready to assist.';
+    } else {
+      systemPrompt = SYSTEM_NOMIS + state.nomisStatusContext;
+      assistantIntro = 'Understood. I am Nomis — at your service. How may I assist you today?';
+    }
+  }
 
   return { systemPrompt, assistantIntro };
 }
@@ -1301,12 +1339,18 @@ async function sendMessage() {
     scrollToBottom(); return;
   }
 
-  /* Nomits check */
-  const canAfford = await Nomits.deduct(state.user.uid);
-  if (!canAfford) {
-    showToast('❌ Not enough Nomits to send a message.');
+  /* Check and update degraded state before sending */
+  await refreshDegradedState();
+
+  /* Deduct Nomits (always allows — degraded mode handles over-limit) */
+  const deducted = await Nomits.deduct(state.user.uid);
+  if (!deducted) {
+    showToast('❌ Could not process Nomits. Please try again.');
     return;
   }
+
+  /* Re-check degraded state after deduction (balance may have just hit 0) */
+  await refreshDegradedState();
 
   const barRamp = startStreamBar();
   state.isStreaming = true; sendBtn.disabled = true;
@@ -1364,13 +1408,12 @@ async function sendMessage() {
 
     const asstMsgIndex = state.messages.length;
     state.messages.push({ role: 'assistant', content: fullContent });
-
-    // Wire up actions now that we have the final content and index
     wireAssistantActions(assistantRow, fullContent, asstMsgIndex);
     Store.updateChat(state.activeChatId, { messages: state.messages, mode: state.mode, persona: state.activePersona });
 
   } catch (err) {
     await Nomits.refund(state.user.uid);
+    await refreshDegradedState();
     thinkingRow.remove();
     appendMessage('assistant', `⚠️ ${err.message || 'Something went wrong. Please try again.'}`);
     showToast('Error: ' + (err.message || 'Request failed'));
@@ -1404,7 +1447,11 @@ async function retryLastMessage(row, bubble) {
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${OPENROUTER_API_KEY}`, 'HTTP-Referer': APP_URL, 'X-Title': 'Nomis AI', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: MODEL, messages, stream: true, max_tokens: 2048, temperature: state.mode === 'nodex' ? 0.5 : 1.0 })
+      body: JSON.stringify({
+        model: MODEL, messages, stream: true,
+        max_tokens: state.isDegraded ? 300 : 2048,
+        temperature: state.isDegraded ? 0.6 : (state.mode === 'nodex' ? 0.5 : 1.0)
+      })
     });
 
     if (!response.ok) throw new Error(`API error ${response.status}`);
@@ -1443,7 +1490,6 @@ function enableMessageEditing(row, bubble, msgIndex) {
 
   const originalHTML = bubble.innerHTML;
 
-  // Build edit UI
   bubble.innerHTML = '';
 
   const textarea = document.createElement('textarea');
@@ -1475,30 +1521,25 @@ function enableMessageEditing(row, bubble, msgIndex) {
   textarea.focus();
   textarea.setSelectionRange(textarea.value.length, textarea.value.length);
 
-  cancelBtn.addEventListener('click', () => {
-    bubble.innerHTML = originalHTML;
-  });
+  cancelBtn.addEventListener('click', () => { bubble.innerHTML = originalHTML; });
 
   saveBtn.addEventListener('click', async () => {
     const newText = textarea.value.trim();
     if (!newText || state.isStreaming) return;
 
-    // Check Nomits
-    const canAfford = await Nomits.deduct(state.user.uid);
-    if (!canAfford) { showToast('❌ Not enough Nomits.'); return; }
+    await refreshDegradedState();
+    const deducted = await Nomits.deduct(state.user.uid);
+    if (!deducted) { showToast('❌ Could not process Nomits.'); return; }
+    await refreshDegradedState();
 
-    // Truncate history from this message onward
     state.messages = state.messages.slice(0, msgIndex);
     state.messages.push({ role: 'user', content: newText });
 
-    // Remove all DOM rows from this index onward
     const allRows = Array.from(messagesList.querySelectorAll('.msg-row'));
     allRows.forEach((r, i) => { if (i >= msgIndex) r.remove(); });
 
-    // Re-render edited user bubble
     bubble.innerHTML = escHtml(newText).replace(/\n/g, '<br>');
 
-    // Stream new assistant response
     const barRamp = startStreamBar();
     state.isStreaming = true; sendBtn.disabled = true;
 
@@ -1527,6 +1568,7 @@ function enableMessageEditing(row, bubble, msgIndex) {
 
     } catch (err) {
       await Nomits.refund(state.user.uid);
+      await refreshDegradedState();
       if (thinkingRow.parentNode) thinkingRow.remove();
       appendMessage('assistant', `⚠️ ${err.message || 'Something went wrong.'}`);
       showToast('Error: ' + (err.message || 'Request failed'));
@@ -1540,8 +1582,7 @@ function enableMessageEditing(row, bubble, msgIndex) {
 }
 
 /* ════════════════════════════════════════
-   WIRE ASSISTANT ACTIONS (retry/copy/share/tts)
-   Called after streaming completes so content is final
+   WIRE ASSISTANT ACTIONS
 ════════════════════════════════════════ */
 function wireAssistantActions(row, content, msgIndex) {
   const existingActions = row.querySelector('.msg-actions');
@@ -1554,14 +1595,12 @@ function wireAssistantActions(row, content, msgIndex) {
   const actions = document.createElement('div');
   actions.className = 'msg-actions';
 
-  // Retry
   const retryBtn = document.createElement('button');
   retryBtn.className = 'action-btn retry-btn';
   retryBtn.title = 'Retry';
   retryBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.5"/></svg> Retry`;
   retryBtn.addEventListener('click', () => retryLastMessage(row, bubble));
 
-  // Copy
   const copyBtn = document.createElement('button');
   copyBtn.className = 'action-btn copy-msg-btn';
   copyBtn.title = 'Copy message';
@@ -1575,14 +1614,12 @@ function wireAssistantActions(row, content, msgIndex) {
     });
   });
 
-  // TTS
   const ttsBtn = document.createElement('button');
   ttsBtn.className = 'action-btn tts-btn';
   ttsBtn.title = 'Listen';
   ttsBtn.innerHTML = ttsIconHTML();
   ttsBtn.addEventListener('click', () => speakText(content, ttsBtn));
 
-  // Share
   const shareBtn = document.createElement('button');
   shareBtn.className = 'action-btn share-btn';
   shareBtn.id = 'share-chat-btn';
@@ -1595,7 +1632,6 @@ function wireAssistantActions(row, content, msgIndex) {
   actions.appendChild(ttsBtn);
   actions.appendChild(shareBtn);
 
-  // Insert before time div
   const timeDiv = contentDiv.querySelector('.msg-time');
   if (timeDiv) contentDiv.insertBefore(actions, timeDiv);
   else contentDiv.appendChild(actions);
@@ -1671,15 +1707,12 @@ function createMessageRow(role, content, imagePreview = null, msgIndex = null) {
 
   if (role === 'assistant') {
     addCopyButtons(bubble);
-    // Actions wired via wireAssistantActions after streaming
-    // For loaded history messages, wire them now
     if (typeof content === 'string' && content.length > 0) {
       wireAssistantActions(row, content, msgIndex);
     }
   }
 
   if (role === 'user') {
-    // Capture msgIndex at render time
     const capturedIndex = msgIndex !== null ? msgIndex : state.messages.length - 1;
     const editActions = document.createElement('div');
     editActions.className = 'msg-actions';
