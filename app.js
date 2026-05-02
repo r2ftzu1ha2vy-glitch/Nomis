@@ -1998,10 +1998,26 @@ function createMessageRow(role, content, imagePreview = null, msgIndex = null) {
    MARKDOWN RENDERER
 ════════════════════════════════════════ */
 function renderMarkdown(text) {
-  let html = escHtml(text);
-  html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) =>
-    `<pre><button class="copy-code-btn" onclick="copyCode(this)">Copy</button><code class="lang-${lang}">${code.trim()}</code></pre>`);
-  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+  // Extract code blocks BEFORE escaping, replace with placeholders
+  const codeBlocks = [];
+  let html = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+    const idx = codeBlocks.length;
+    codeBlocks.push(`<pre><button class="copy-code-btn" onclick="copyCode(this)">Copy</button><code class="lang-${lang}">${escHtml(code.trim())}</code></pre>`);
+    return `\x00CODE${idx}\x00`;
+  });
+
+  // Extract inline code BEFORE escaping too
+  const inlineCodes = [];
+  html = html.replace(/`([^`]+)`/g, (_, code) => {
+    const idx = inlineCodes.length;
+    inlineCodes.push(`<code>${escHtml(code)}</code>`);
+    return `\x00INLINE${idx}\x00`;
+  });
+
+  // NOW escape the rest
+  html = escHtml(html);
+
+  // Apply other markdown transformations
   html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   html = html.replace(/__([^_]+)__/g, '<strong>$1</strong>');
   html = html.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
@@ -2015,6 +2031,11 @@ function renderMarkdown(text) {
   html = html.replace(/\n{2,}/g, '</p><p>');
   html = html.replace(/\n/g, '<br>');
   if (!html.startsWith('<')) html = '<p>' + html + '</p>';
+
+  // Restore placeholders
+  html = html.replace(/\x00CODE(\d+)\x00/g, (_, i) => codeBlocks[i]);
+  html = html.replace(/\x00INLINE(\d+)\x00/g, (_, i) => inlineCodes[i]);
+
   return html;
 }
 
