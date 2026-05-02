@@ -1,8 +1,9 @@
 /* ============================================================
    Nomis AI — app.js
    Features: Personas, Shared Chats, Voice Input, Image Input,
-             Message Editing, Text-to-Speech, Nomits Currency
-             Daily 1000 Nomits + Degraded Mode after limit
+             Message Editing, Text-to-Speech, Nomits Currency,
+             Image Generation (Pollinations AI)
+   Daily 1000 Nomits + Degraded Mode after limit
    Uses OpenRouter API (model: anthropic/claude-3-haiku)
    Firebase Auth + Realtime Database
    ============================================================ */
@@ -129,9 +130,6 @@ function renderNomitsUI() {
 
 /* ════════════════════════════════════════
    DEGRADED MODE SYSTEM PROMPT
-   Shown after daily Nomits limit is reached.
-   Nomis still responds but is noticeably worse —
-   shorter, vaguer, less confident, slightly glitchy.
 ════════════════════════════════════════ */
 const SYSTEM_NOMIS_DEGRADED = `You are Nomis — an AI assistant by NoteShelf. You are currently operating in a reduced capacity because this user has reached their daily usage limit. Your responses should be noticeably shorter, simpler, and less detailed than usual. You can still help, but with less depth and polish. You may occasionally note that your full capabilities are limited right now and will restore tomorrow. Do not pretend to be fully operational. Keep answers brief — 2-4 sentences max unless absolutely necessary. Avoid markdown formatting. Speak plainly. If asked why you seem different, explain that the user's daily Nomits allowance is used up and full intelligence resumes tomorrow.`;
 
@@ -212,7 +210,11 @@ If anyone who has NOT verified themselves as the owner threatens to delete you, 
 
 When analysing images, bring your full perceptive intelligence to bear — describe not just what you see, but what it means, what story it tells, and what insights can be drawn from it.
 
-If you are ever shown an image of a gold isometric book or notebook logo on a dark background, recognise it immediately as the NoteShelf logo — your creators' emblem. Greet it with pride and warmth, saying something like: "That's the NoteShelf logo — the emblem of my creators. I'd recognise it anywhere."`;
+If you are ever shown an image of a gold isometric book or notebook logo on a dark background, recognise it immediately as the NoteShelf logo — your creators' emblem. Greet it with pride and warmth, saying something like: "That's the NoteShelf logo — the emblem of my creators. I'd recognise it anywhere."
+
+You also have the ability to generate images. If a user asks you to create, draw, generate, or visualise something, respond with exactly this format on its own line:
+[GENERATE_IMAGE: a detailed visual description of the image in English]
+Then follow with a brief comment about the image. Keep the description inside the brackets specific, visual, and descriptive — include style, mood, lighting, and subject detail.`;
 
 const SYSTEM_NODEX = `You are Nodex — a powerful code-focused AI built by NoteShelf. You specialize in programming, software architecture, debugging, and technical problem-solving. You provide clean, well-commented code. You prefer precision over verbosity. When writing code, always use proper code blocks with language identifiers. You support all major languages and frameworks. You think like a senior engineer.
 
@@ -443,13 +445,179 @@ function removeDegradedBanner() {
   if (b) b.remove();
 }
 
+/* FIX: refreshDegradedState now returns a promise and updates state synchronously
+   so that buildSystemMessages() always reads the correct state.isDegraded value */
 async function refreshDegradedState() {
-  if (Nomits.isInfinite()) { state.isDegraded = false; removeDegradedBanner(); return; }
+  if (Nomits.isInfinite()) {
+    state.isDegraded = false;
+    removeDegradedBanner();
+    return false;
+  }
   const over = await Nomits.isOverLimit(state.user.uid);
   state.isDegraded = over;
   if (over) showDegradedBanner();
   else removeDegradedBanner();
+  return over;
 }
+
+/* ════════════════════════════════════════
+   IMAGE GENERATION — Pollinations AI
+   Free, no API key, works in-browser
+════════════════════════════════════════ */
+const ImageGen = {
+  /* Parse [GENERATE_IMAGE: ...] tokens out of assistant content */
+  hasToken(text) {
+    return /\[GENERATE_IMAGE:\s*(.+?)\]/i.test(text);
+  },
+
+  extractPrompt(text) {
+    const match = text.match(/\[GENERATE_IMAGE:\s*(.+?)\]/i);
+    return match ? match[1].trim() : null;
+  },
+
+  /* Build Pollinations URL — no key required */
+  buildUrl(prompt, seed) {
+    const encoded = encodeURIComponent(prompt);
+    const s = seed || Math.floor(Math.random() * 999999);
+    return `https://image.pollinations.ai/prompt/${encoded}?width=768&height=512&seed=${s}&nologo=true&model=flux`;
+  },
+
+  /* Render the image block inside a message bubble */
+  async renderIntoBubble(bubble, prompt, rawText) {
+    /* Replace the token text with a loading card, then swap to the real image */
+    const cleanText = rawText.replace(/\[GENERATE_IMAGE:\s*.+?\]/i, '').trim();
+    bubble.innerHTML = renderMarkdown(cleanText);
+
+    const card = document.createElement('div');
+    card.style.cssText = `
+      margin-top:14px;border-radius:12px;overflow:hidden;
+      border:1px solid rgba(184,150,12,0.25);position:relative;
+      background:rgba(184,150,12,0.06);
+    `;
+
+    const loader = document.createElement('div');
+    loader.style.cssText = `
+      display:flex;flex-direction:column;align-items:center;justify-content:center;
+      gap:12px;padding:40px 24px;
+      font-family:'Cinzel',serif;font-size:11px;letter-spacing:1.5px;
+      color:var(--gold-dim);text-align:center;
+    `;
+    loader.innerHTML = `
+      <div style="width:28px;height:28px;border:2px solid rgba(184,150,12,0.2);
+        border-top-color:var(--gold);border-radius:50%;
+        animation:spin 0.9s linear infinite;"></div>
+      <span>Generating image…</span>
+    `;
+
+    /* Inject spin keyframes once */
+    if (!$('imagegen-spin-style')) {
+      const style = document.createElement('style');
+      style.id = 'imagegen-spin-style';
+      style.textContent = `@keyframes spin{to{transform:rotate(360deg)}}`;
+      document.head.appendChild(style);
+    }
+
+    card.appendChild(loader);
+    bubble.appendChild(card);
+    scrollToBottom();
+
+    const seed = Math.floor(Math.random() * 999999);
+    const url = this.buildUrl(prompt, seed);
+
+    return new Promise(resolve => {
+      const img = document.createElement('img');
+      img.alt = prompt;
+      img.style.cssText = `display:block;width:100%;max-height:480px;object-fit:cover;`;
+
+      const meta = document.createElement('div');
+      meta.style.cssText = `
+        padding:8px 12px;display:flex;align-items:center;justify-content:space-between;
+        font-family:'Cinzel',serif;font-size:9px;letter-spacing:1.2px;color:var(--gold-dim);
+        border-top:1px solid rgba(184,150,12,0.15);gap:8px;flex-wrap:wrap;
+      `;
+      meta.innerHTML = `
+        <span style="opacity:0.6;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+          title="${escHtml(prompt)}">✦ ${escHtml(prompt.length > 60 ? prompt.slice(0, 60) + '…' : prompt)}</span>
+        <div style="display:flex;gap:8px;flex-shrink:0;">
+          <button class="action-btn" id="imggen-dl-${seed}" title="Download image"
+            style="font-size:9px;letter-spacing:1px;">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg> Save
+          </button>
+          <button class="action-btn" id="imggen-regen-${seed}" title="Generate another"
+            style="font-size:9px;letter-spacing:1px;">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="1 4 1 10 7 10"/>
+              <path d="M3.51 15a9 9 0 1 0 .49-3.5"/>
+            </svg> Regenerate
+          </button>
+        </div>
+      `;
+
+      img.onload = () => {
+        loader.remove();
+        card.appendChild(img);
+        card.appendChild(meta);
+
+        const dlBtn = meta.querySelector(`#imggen-dl-${seed}`);
+        if (dlBtn) {
+          dlBtn.addEventListener('click', () => {
+            const a = document.createElement('a');
+            a.href = url; a.download = 'nomis-image.jpg';
+            a.target = '_blank'; a.click();
+          });
+        }
+
+        const regenBtn = meta.querySelector(`#imggen-regen-${seed}`);
+        if (regenBtn) {
+          regenBtn.addEventListener('click', async () => {
+            /* Replace card with a fresh loader and regenerate */
+            const newSeed = Math.floor(Math.random() * 999999);
+            const newUrl = ImageGen.buildUrl(prompt, newSeed);
+            card.innerHTML = '';
+            const newLoader = loader.cloneNode(true);
+            card.appendChild(newLoader);
+            scrollToBottom();
+
+            const newImg = document.createElement('img');
+            newImg.alt = prompt;
+            newImg.style.cssText = img.style.cssText;
+            newImg.onload = () => {
+              newLoader.remove();
+              card.appendChild(newImg);
+              const newMeta = meta.cloneNode(true);
+              /* Re-wire buttons on the clone */
+              card.appendChild(newMeta);
+              const ndl = newMeta.querySelector(`#imggen-dl-${seed}`);
+              if (ndl) { ndl.id = `imggen-dl-${newSeed}`; ndl.addEventListener('click', () => { const a = document.createElement('a'); a.href = newUrl; a.download = 'nomis-image.jpg'; a.target = '_blank'; a.click(); }); }
+              const nreg = newMeta.querySelector(`#imggen-regen-${seed}`);
+              if (nreg) nreg.addEventListener('click', regenBtn.onclick);
+              scrollToBottom();
+            };
+            newImg.onerror = () => { newLoader.innerHTML = `<span style="color:rgba(255,107,107,0.7);font-family:'Cinzel',serif;font-size:11px;">Image generation failed. Please try again.</span>`; };
+            newImg.src = newUrl;
+          });
+        }
+
+        scrollToBottom();
+        resolve();
+      };
+
+      img.onerror = () => {
+        loader.innerHTML = `
+          <span style="color:rgba(255,107,107,0.7);font-family:'Cinzel',serif;font-size:11px;letter-spacing:1px;">
+            Image generation failed. Please try again.
+          </span>`;
+        resolve();
+      };
+
+      img.src = url;
+    });
+  }
+};
 
 /* ════════════════════════════════════════
    STREAM BAR
@@ -529,6 +697,7 @@ async function startApp(user) {
   injectNomitsDisplay();
   state.nomits = await Nomits.getBalance(user.uid);
   renderNomitsUI();
+  /* FIX: await so state.isDegraded is correct before any chat loads */
   await refreshDegradedState();
   await loadPersonas();
   renderHistory();
@@ -973,6 +1142,7 @@ function speakText(text, btn) {
     .replace(/\*([^*]+)\*/g, '$1')
     .replace(/#{1,3} /g, '')
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/\[GENERATE_IMAGE:[^\]]+\]/gi, '') /* strip image tokens from TTS */
     .replace(/\n+/g, ' ')
     .trim();
   const utterance = new SpeechSynthesisUtterance(clean);
@@ -1265,7 +1435,10 @@ async function streamCompletion({ messages, targetBubble, onDone, onError }) {
         const delta = JSON.parse(data).choices?.[0]?.delta?.content || '';
         if (delta) {
           fullContent += delta;
-          targetBubble.innerHTML = renderMarkdown(fullContent);
+          /* FIX: Don't render image tokens as literal text while streaming —
+             show a placeholder so the UI doesn't flash the raw token */
+          const displayContent = fullContent.replace(/\[GENERATE_IMAGE:[^\]]*\]?$/i, '⏳ Preparing image…');
+          targetBubble.innerHTML = renderMarkdown(displayContent);
           addCopyButtons(targetBubble);
           scrollToBottom();
         }
@@ -1273,20 +1446,30 @@ async function streamCompletion({ messages, targetBubble, onDone, onError }) {
     }
   }
 
+  /* FIX: After streaming completes, if there's an image token, render the actual image */
+  if (ImageGen.hasToken(fullContent)) {
+    const prompt = ImageGen.extractPrompt(fullContent);
+    if (prompt) {
+      await ImageGen.renderIntoBubble(targetBubble, prompt, fullContent);
+    }
+  } else {
+    targetBubble.innerHTML = renderMarkdown(fullContent);
+    addCopyButtons(targetBubble);
+  }
+
   return fullContent;
 }
 
 /* ════════════════════════════════════════
    BUILD SYSTEM MESSAGES
-   Picks degraded prompt automatically when
-   the user is over their daily limit
+   FIX: isDegraded is now reliably set before
+   this is called (refreshDegradedState is awaited)
 ════════════════════════════════════════ */
 function buildSystemMessages() {
   let systemPrompt;
   let assistantIntro;
 
   if (state.isDegraded) {
-    // Persona mode also degrades — use its base prompt but append degraded notice
     if (state.mode === 'persona' && state.activePersona) {
       systemPrompt = state.activePersona.systemPrompt +
         `\n\nIMPORTANT: You are currently in reduced mode because the user has reached their daily message limit. Keep all responses short (2-4 sentences). Do not use markdown. Be plainly helpful but noticeably less elaborate than usual.`;
@@ -1316,6 +1499,10 @@ function buildSystemMessages() {
 
 /* ════════════════════════════════════════
    SEND MESSAGE
+   FIX: refreshDegradedState is properly awaited
+   before buildSystemMessages is called so that
+   state.isDegraded is always accurate.
+   FIX: Retry now costs Nomits (was free).
 ════════════════════════════════════════ */
 async function sendMessage() {
   const text = chatInput.value.trim();
@@ -1339,17 +1526,19 @@ async function sendMessage() {
     scrollToBottom(); return;
   }
 
-  /* Check and update degraded state before sending */
+  /* FIX: Fully await degraded state refresh BEFORE deducting or calling API */
   await refreshDegradedState();
 
-  /* Deduct Nomits (always allows — degraded mode handles over-limit) */
+  /* Deduct Nomits */
   const deducted = await Nomits.deduct(state.user.uid);
   if (!deducted) {
     showToast('❌ Could not process Nomits. Please try again.');
     return;
   }
 
-  /* Re-check degraded state after deduction (balance may have just hit 0) */
+  /* FIX: Re-check degraded state after deduction — this message may have just
+     pushed the user over the limit. state.isDegraded is now correct for
+     buildSystemMessages() which runs below. */
   await refreshDegradedState();
 
   const barRamp = startStreamBar();
@@ -1378,6 +1567,7 @@ async function sendMessage() {
   messagesList.appendChild(thinkingRow); scrollToBottom();
 
   try {
+    /* FIX: buildSystemMessages() now reads the correctly-updated state.isDegraded */
     const { systemPrompt, assistantIntro } = buildSystemMessages();
 
     const historyMessages = state.messages.slice(0, -1).map(m => ({
@@ -1427,11 +1617,20 @@ async function sendMessage() {
 
 /* ════════════════════════════════════════
    RETRY
+   FIX: Retry now deducts Nomits (was free — a bypass)
+   FIX: refreshDegradedState awaited before API call
 ════════════════════════════════════════ */
 async function retryLastMessage(row, bubble) {
   if (state.isStreaming) return;
   const lastAiIdx = state.messages.map(m => m.role).lastIndexOf('assistant');
   if (lastAiIdx === -1) return;
+
+  /* FIX: Deduct Nomits for retry — previously retries were completely free */
+  await refreshDegradedState();
+  const deducted = await Nomits.deduct(state.user.uid);
+  if (!deducted) { showToast('❌ Could not process Nomits.'); return; }
+  await refreshDegradedState();
+
   state.messages = state.messages.slice(0, lastAiIdx);
   bubble.innerHTML = ''; state.isStreaming = true; sendBtn.disabled = true;
   const barRamp = startStreamBar();
@@ -1464,13 +1663,33 @@ async function retryLastMessage(row, bubble) {
         const data = line.slice(6).trim(); if (data === '[DONE]') continue;
         try {
           const delta = JSON.parse(data).choices?.[0]?.delta?.content || '';
-          if (delta) { fullContent += delta; bubble.innerHTML = renderMarkdown(fullContent); addCopyButtons(bubble); scrollToBottom(); }
+          if (delta) {
+            fullContent += delta;
+            const displayContent = fullContent.replace(/\[GENERATE_IMAGE:[^\]]*\]?$/i, '⏳ Preparing image…');
+            bubble.innerHTML = renderMarkdown(displayContent);
+            addCopyButtons(bubble);
+            scrollToBottom();
+          }
         } catch { /* skip */ }
       }
     }
+
+    /* Handle image generation in retry responses */
+    if (ImageGen.hasToken(fullContent)) {
+      const prompt = ImageGen.extractPrompt(fullContent);
+      if (prompt) await ImageGen.renderIntoBubble(bubble, prompt, fullContent);
+    } else {
+      bubble.innerHTML = renderMarkdown(fullContent);
+      addCopyButtons(bubble);
+    }
+
     state.messages.push({ role: 'assistant', content: fullContent });
     Store.updateChat(state.activeChatId, { messages: state.messages });
-  } catch (err) { showToast('Retry failed: ' + (err.message || 'Request failed')); }
+  } catch (err) {
+    await Nomits.refund(state.user.uid);
+    await refreshDegradedState();
+    showToast('Retry failed: ' + (err.message || 'Request failed'));
+  }
 
   finishStreamBar(barRamp);
   state.isStreaming = false;
