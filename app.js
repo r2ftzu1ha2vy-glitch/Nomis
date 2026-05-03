@@ -39,31 +39,28 @@ const db = getDatabase(firebaseApp);
 
 const OWNER_EMAIL = 'r2ftzu1ha2vy@gmail.com';
 
-/* ════════════════════════════════════════
-   NOMITS CURRENCY — DAILY RESET SYSTEM
-════════════════════════════════════════ */
-const NOMITS_DAILY = 1000;
-const NOMITS_COST  = 50;
+const NOMITS_COST     = 50;
+const NOMITS_DAILY_GRANT = 1000;
 
 const Nomits = {
   isInfinite() { return state.user?.email === OWNER_EMAIL; },
 
-  _todayKey() {
-    const d = new Date();
-    return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-  },
-
+  /* Returns current balance, applying today's daily grant if not yet claimed */
   async getBalance(uid) {
     if (this.isInfinite()) return Infinity;
     try {
-      const snap = await get(ref(db, `users/${uid}/daily`));
-      const data = snap.exists() ? snap.val() : {};
+      const snap = await get(ref(db, `users/${uid}/nomits`));
+      const data = snap.exists() ? snap.val() : { balance: 0, lastGrantDate: '' };
       const today = this._todayKey();
-      if (data.date !== today) {
-        await set(ref(db, `users/${uid}/daily`), { date: today, used: 0 });
-        return NOMITS_DAILY;
+      if (data.lastGrantDate !== today) {
+        const newBalance = (data.balance || 0) + NOMITS_DAILY_GRANT;
+        await set(ref(db, `users/${uid}/nomits`), {
+          balance: newBalance,
+          lastGrantDate: today
+        });
+        return newBalance;
       }
-      return Math.max(0, NOMITS_DAILY - (data.used || 0));
+      return Math.max(0, data.balance || 0);
     } catch { return 0; }
   },
 
@@ -73,33 +70,46 @@ const Nomits = {
     return bal <= 0;
   },
 
-  async deduct(uid) {
+  async deduct(uid, amount = NOMITS_COST) {
     if (this.isInfinite()) return true;
     try {
-      const snap = await get(ref(db, `users/${uid}/daily`));
+      const snap = await get(ref(db, `users/${uid}/nomits`));
       const today = this._todayKey();
-      let data = snap.exists() ? snap.val() : { date: today, used: 0 };
-      if (data.date !== today) data = { date: today, used: 0 };
-      const next = (data.used || 0) + NOMITS_COST;
-      await set(ref(db, `users/${uid}/daily`), { date: today, used: next });
-      state.nomits = Math.max(0, NOMITS_DAILY - next);
+      let data = snap.exists() ? snap.val() : { balance: 0, lastGrantDate: today };
+      /* Apply daily grant if needed before deducting */
+      if (data.lastGrantDate !== today) {
+        data.balance = (data.balance || 0) + NOMITS_DAILY_GRANT;
+        data.lastGrantDate = today;
+      }
+      if ((data.balance || 0) < amount) return false;
+      data.balance = Math.max(0, data.balance - amount);
+      await set(ref(db, `users/${uid}/nomits`), data);
+      state.nomits = data.balance;
       renderNomitsUI();
       return true;
     } catch { return false; }
   },
 
-  async refund(uid) {
+  async add(uid, amount) {
     if (this.isInfinite()) return;
     try {
-      const snap = await get(ref(db, `users/${uid}/daily`));
+      const snap = await get(ref(db, `users/${uid}/nomits`));
       const today = this._todayKey();
-      const data = snap.exists() ? snap.val() : { date: today, used: 0 };
-      if (data.date !== today) return;
-      const next = Math.max(0, (data.used || 0) - NOMITS_COST);
-      await set(ref(db, `users/${uid}/daily`), { date: today, used: next });
-      state.nomits = Math.max(0, NOMITS_DAILY - next);
+      let data = snap.exists() ? snap.val() : { balance: 0, lastGrantDate: today };
+      data.balance = (data.balance || 0) + amount;
+      await set(ref(db, `users/${uid}/nomits`), data);
+      state.nomits = data.balance;
       renderNomitsUI();
     } catch {}
+  },
+
+  async refund(uid, amount = NOMITS_COST) {
+    await this.add(uid, amount);
+  },
+
+  _todayKey() {
+    const d = new Date();
+    return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
   }
 };
 
@@ -109,25 +119,124 @@ function renderNomitsUI() {
   if (Nomits.isInfinite()) {
     el.innerHTML = `<span style="color:var(--gold)">✦</span> ∞ Nomits`;
     el.title = 'Infinite Nomits — Creator account';
-    el.style.color = '';
-    el.style.borderColor = '';
+    el.style.color = ''; el.style.borderColor = '';
     return;
   }
   const n = state.nomits ?? '…';
   const isOver = typeof n === 'number' && n <= 0;
-  el.innerHTML = `<span style="color:var(--gold)">✦</span> ${isOver ? '0' : n} / ${NOMITS_DAILY} Nomits`;
+  const display = typeof n === 'number' ? n.toLocaleString() : n;
+  el.innerHTML = `<span style="color:var(--gold)">✦</span> ${display} Nomits`;
   el.title = isOver
-    ? `Daily limit reached — degraded mode active. Resets tomorrow.`
-    : `${NOMITS_COST} Nomits per message · Resets daily`;
-  if (isOver) {
-    el.style.color = 'var(--red)';
-    el.style.borderColor = 'rgba(255,107,107,0.3)';
-  } else {
-    el.style.color = '';
-    el.style.borderColor = '';
-  }
+    ? 'No Nomits remaining — you\'ll receive 1,000 more tomorrow.'
+    : `${NOMITS_COST} Nomits per message · 1,000 added daily`;
+  el.style.color = isOver ? 'var(--red)' : '';
+  el.style.borderColor = isOver ? 'rgba(255,107,107,0.3)' : '';
 }
+/* ════════════════════════════════════════
+   REFERRAL SYSTEM
+════════════════════════════════════════ */
+const Referrals = {
+  BONUS: 500,
 
+  _generateCode(uid) {
+    /* Short deterministic code: first 4 chars of uid + 4 random alphanum */
+    const rand = Math.random().toString(36).substring(2, 6).toUpperCase();
+    return uid.substring(0, 4).toUpperCase() + rand;
+  },
+
+  async getOrCreateCode(uid) {
+    try {
+      const snap = await get(ref(db, `users/${uid}/referralCode`));
+      if (snap.exists()) return snap.val();
+      const code = this._generateCode(uid);
+      await set(ref(db, `users/${uid}/referralCode`), code);
+      /* Index: code → uid so we can look up who owns a code */
+      await set(ref(db, `referralCodes/${code}`), uid);
+      return code;
+    } catch { return null; }
+  },
+
+  async redeem(redeemerUid, code) {
+    if (!code) return { ok: false, msg: 'Please enter a referral code.' };
+    const upperCode = code.trim().toUpperCase();
+    try {
+      /* Check code exists */
+      const ownerSnap = await get(ref(db, `referralCodes/${upperCode}`));
+      if (!ownerSnap.exists()) return { ok: false, msg: 'Invalid referral code.' };
+      const ownerUid = ownerSnap.val();
+      if (ownerUid === redeemerUid) return { ok: false, msg: 'You cannot use your own referral code.' };
+
+      /* Check not already redeemed */
+      const usedSnap = await get(ref(db, `users/${redeemerUid}/redeemedReferrals/${upperCode}`));
+      if (usedSnap.exists()) return { ok: false, msg: 'You have already used this referral code.' };
+
+      /* Grant bonus to both */
+      await Nomits.add(redeemerUid, this.BONUS);
+      await Nomits.add(ownerUid, this.BONUS);
+
+      /* Mark as redeemed */
+      await set(ref(db, `users/${redeemerUid}/redeemedReferrals/${upperCode}`), Date.now());
+
+      /* Track referral count on owner */
+      const countSnap = await get(ref(db, `users/${ownerUid}/referralCount`));
+      const count = countSnap.exists() ? countSnap.val() : 0;
+      await set(ref(db, `users/${ownerUid}/referralCount`), count + 1);
+
+      return { ok: true };
+    } catch (e) { return { ok: false, msg: 'Something went wrong. Please try again.' }; }
+  }
+};
+/* ════════════════════════════════════════
+   USER API KEY SYSTEM
+   Generates a personal Nomis API key per user.
+   Each key use tracked in Firebase → awards 100 Nomits.
+   Keys are stored at: userApiKeys/{apiKey} → uid
+════════════════════════════════════════ */
+const UserApiKeys = {
+  REWARD: 100,
+
+  _generate() {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let key = 'nmk_';
+    for (let i = 0; i < 32; i++) key += chars[Math.floor(Math.random() * chars.length)];
+    return key;
+  },
+
+  async getOrCreate(uid) {
+    try {
+      const snap = await get(ref(db, `users/${uid}/apiKey`));
+      if (snap.exists()) return snap.val();
+      const key = this._generate();
+      await set(ref(db, `users/${uid}/apiKey`), key);
+      await set(ref(db, `userApiKeys/${key}`), { uid, createdAt: Date.now(), uses: 0 });
+      return key;
+    } catch { return null; }
+  },
+
+  async recordUse(apiKey) {
+    /* Called when someone uses a user's API key — awards Nomits to the key owner */
+    try {
+      const snap = await get(ref(db, `userApiKeys/${apiKey}`));
+      if (!snap.exists()) return false;
+      const { uid, uses } = snap.val();
+      await update(ref(db, `userApiKeys/${apiKey}`), { uses: (uses || 0) + 1, lastUsed: Date.now() });
+      await Nomits.add(uid, this.REWARD);
+      return true;
+    } catch { return false; }
+  },
+
+  async getStats(uid) {
+    try {
+      const keySnap = await get(ref(db, `users/${uid}/apiKey`));
+      if (!keySnap.exists()) return { uses: 0, earned: 0 };
+      const key = keySnap.val();
+      const statsSnap = await get(ref(db, `userApiKeys/${key}`));
+      if (!statsSnap.exists()) return { uses: 0, earned: 0 };
+      const { uses } = statsSnap.val();
+      return { uses: uses || 0, earned: (uses || 0) * this.REWARD };
+    } catch { return { uses: 0, earned: 0 }; }
+  }
+};
 /* ════════════════════════════════════════
    DEGRADED MODE SYSTEM PROMPT
 ════════════════════════════════════════ */
@@ -452,19 +561,60 @@ const charCount         = $('char-count');
 ════════════════════════════════════════ */
 function injectNomitsDisplay() {
   if ($('nomits-display')) return;
-  const el = document.createElement('div');
-  el.id = 'nomits-display';
-  el.style.cssText = `
+
+  const sidebarBottom = $('sidebar-bottom');
+  const userInfo = $('user-info');
+  if (!sidebarBottom || !userInfo) return;
+
+  /* Nomits display */
+  const nomitsEl = document.createElement('div');
+  nomitsEl.id = 'nomits-display';
+  nomitsEl.style.cssText = `
     font-family:'Cinzel',serif;font-size:11px;letter-spacing:1.5px;
     color:var(--gold-dim);padding:7px 14px;
     background:rgba(184,150,12,0.07);border:1px solid rgba(184,150,12,0.2);
     border-radius:20px;margin:0 12px 2px;text-align:center;
     cursor:default;transition:all 0.3s;user-select:none;
   `;
-  el.innerHTML = `<span style="color:var(--gold)">✦</span> … Nomits`;
-  const sidebarBottom = $('sidebar-bottom');
-  const userInfo = $('user-info');
-  if (sidebarBottom && userInfo) sidebarBottom.insertBefore(el, userInfo);
+  nomitsEl.innerHTML = `<span style="color:var(--gold)">✦</span> … Nomits`;
+
+  /* Sidebar action buttons row */
+  const btnRow = document.createElement('div');
+  btnRow.style.cssText = 'display:flex;gap:6px;padding:0 12px;margin-bottom:2px;';
+
+  const mkBtn = (icon, label, onClick) => {
+    const b = document.createElement('button');
+    b.style.cssText = `
+      flex:1;display:flex;align-items:center;justify-content:center;gap:5px;
+      padding:7px 4px;background:rgba(184,150,12,0.06);
+      border:1px solid rgba(184,150,12,0.18);border-radius:10px;
+      color:var(--gold-dim);font-family:'Cinzel',serif;font-size:8px;
+      letter-spacing:1.2px;cursor:pointer;transition:all 0.2s;
+      text-transform:uppercase;white-space:nowrap;
+    `;
+    b.innerHTML = `${icon} ${label}`;
+    b.onmouseover = () => { b.style.background = 'rgba(184,150,12,0.12)'; b.style.color = 'var(--gold)'; };
+    b.onmouseout  = () => { b.style.background = 'rgba(184,150,12,0.06)'; b.style.color = 'var(--gold-dim)'; };
+    b.addEventListener('click', onClick);
+    return b;
+  };
+
+  const searchIcon = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>`;
+  const exportIcon = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
+  const referralIcon = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`;
+  const keyIcon = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>`;
+
+  btnRow.appendChild(mkBtn(searchIcon, 'Search', openChatSearch));
+  btnRow.appendChild(mkBtn(exportIcon, 'Export', openExportMenu));
+
+  const btnRow2 = document.createElement('div');
+  btnRow2.style.cssText = 'display:flex;gap:6px;padding:0 12px;margin-bottom:4px;';
+  btnRow2.appendChild(mkBtn(referralIcon, 'Referral', openReferralModal));
+  btnRow2.appendChild(mkBtn(keyIcon, 'Get API Key', openApiKeyModal));
+
+  sidebarBottom.insertBefore(nomitsEl, userInfo);
+  sidebarBottom.insertBefore(btnRow2, nomitsEl);
+  sidebarBottom.insertBefore(btnRow, btnRow2);
 }
 
 /* ════════════════════════════════════════
@@ -504,7 +654,10 @@ async function refreshDegradedState() {
     removeDegradedBanner();
     return false;
   }
-  const over = await Nomits.isOverLimit(state.user.uid);
+  const bal = await Nomits.getBalance(state.user.uid);
+  state.nomits = bal;
+  renderNomitsUI();
+  const over = bal <= 0;
   state.isDegraded = over;
   if (over) showDegradedBanner();
   else removeDegradedBanner();
@@ -1271,6 +1424,397 @@ function renderHistory() {
       if (window.innerWidth < 769) closeMobileSidebar();
     });
     chatHistoryEl.appendChild(div);
+  });
+}
+/* ════════════════════════════════════════
+   CHAT SEARCH
+════════════════════════════════════════ */
+function openChatSearch() {
+  if ($('chat-search-overlay')) { $('chat-search-overlay').remove(); return; }
+
+  const overlay = document.createElement('div');
+  overlay.id = 'chat-search-overlay';
+  overlay.style.cssText = `
+    position:fixed;inset:0;background:rgba(5,4,10,0.88);backdrop-filter:blur(10px);
+    z-index:15000;display:flex;align-items:flex-start;justify-content:center;
+    padding-top:80px;animation:authIn 0.2s ease forwards;
+  `;
+
+  overlay.innerHTML = `
+    <div style="
+      width:min(600px,calc(100vw - 32px));
+      background:linear-gradient(160deg,var(--ink-mid),var(--ink));
+      border:1px solid rgba(184,150,12,0.35);border-radius:16px;
+      box-shadow:0 40px 100px rgba(0,0,0,0.9);overflow:hidden;
+    ">
+      <div style="padding:16px 20px;border-bottom:1px solid rgba(184,150,12,0.15);display:flex;align-items:center;gap:12px;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgba(184,150,12,0.6)" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+        <input id="chat-search-input" type="text" placeholder="Search conversations…" autocomplete="off" style="
+          flex:1;background:none;border:none;outline:none;
+          color:var(--cream);font-family:'EB Garamond',serif;font-size:16px;
+        "/>
+        <button id="chat-search-close" style="background:none;border:none;color:var(--gold-dim);cursor:pointer;font-size:18px;line-height:1;">×</button>
+      </div>
+      <div id="chat-search-results" style="max-height:60vh;overflow-y:auto;padding:8px 0;"></div>
+    </div>`;
+
+  document.body.appendChild(overlay);
+  const input = $('chat-search-input');
+  const results = $('chat-search-results');
+  input.focus();
+
+  const close = () => overlay.remove();
+  $('chat-search-close').addEventListener('click', close);
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+  document.addEventListener('keydown', function esc(e) {
+    if (e.key === 'Escape') { close(); document.removeEventListener('keydown', esc); }
+  });
+
+  const doSearch = () => {
+    const q = input.value.trim().toLowerCase();
+    const chats = Store.get();
+    results.innerHTML = '';
+
+    if (!q) {
+      results.innerHTML = `<div style="font-family:'EB Garamond',serif;font-size:13px;color:var(--gold-dim);opacity:0.45;padding:16px 20px;font-style:italic;">Start typing to search…</div>`;
+      return;
+    }
+
+    const hits = [];
+    chats.forEach(chat => {
+      const titleMatch = (chat.title || '').toLowerCase().includes(q);
+      const msgMatches = (chat.messages || []).filter(m =>
+        typeof m.content === 'string' && m.content.toLowerCase().includes(q)
+      );
+      if (titleMatch || msgMatches.length) {
+        hits.push({ chat, matchCount: msgMatches.length + (titleMatch ? 1 : 0), snippet: msgMatches[0]?.content || '' });
+      }
+    });
+
+    if (!hits.length) {
+      results.innerHTML = `<div style="font-family:'EB Garamond',serif;font-size:13px;color:var(--gold-dim);opacity:0.45;padding:16px 20px;font-style:italic;">No conversations found.</div>`;
+      return;
+    }
+
+    hits.sort((a, b) => b.matchCount - a.matchCount).forEach(({ chat, matchCount, snippet }) => {
+      const item = document.createElement('div');
+      item.style.cssText = `padding:12px 20px;cursor:pointer;border-bottom:1px solid rgba(184,150,12,0.07);transition:background 0.15s;`;
+      item.onmouseover = () => item.style.background = 'rgba(184,150,12,0.06)';
+      item.onmouseout = () => item.style.background = '';
+
+      const modeLabel = chat.mode === 'nodex' ? 'Nodex' : chat.mode === 'persona' ? (chat.persona?.name || 'Persona') : 'Nomis';
+      const snippetClean = snippet ? snippet.replace('\n[Image attached]', '').slice(0, 120) : '';
+      const highlighted = snippetClean.replace(new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi'), `<mark style="background:rgba(184,150,12,0.3);color:var(--cream);border-radius:2px;">$1</mark>`);
+
+      item.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+          <span style="font-family:'Cinzel',serif;font-size:11px;color:var(--cream);">${escHtml(chat.title || 'Untitled')}</span>
+          <span style="font-family:'Cinzel',serif;font-size:9px;letter-spacing:1px;color:var(--gold-dim);">${modeLabel} · ${matchCount} match${matchCount !== 1 ? 'es' : ''}</span>
+        </div>
+        ${snippetClean ? `<div style="font-family:'EB Garamond',serif;font-size:13px;color:rgba(245,240,220,0.5);line-height:1.5;">${highlighted}</div>` : ''}`;
+
+      item.addEventListener('click', () => {
+        loadChat(chat.id);
+        close();
+        if (window.innerWidth < 769) closeMobileSidebar();
+      });
+      results.appendChild(item);
+    });
+  };
+
+  input.addEventListener('input', doSearch);
+  doSearch();
+}
+/* ════════════════════════════════════════
+   CHAT EXPORT
+════════════════════════════════════════ */
+function exportChat(format = 'markdown') {
+  const chat = Store.get().find(c => c.id === state.activeChatId);
+  if (!chat || !chat.messages?.length) { showToast('Nothing to export yet.'); return; }
+
+  const title = chat.title || 'Nomis Conversation';
+  const date = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+  const msgs = chat.messages.filter(m => m.role !== 'system');
+
+  if (format === 'markdown') {
+    const lines = [`# ${title}`, `*Exported from Nomis AI · ${date}*`, ''];
+    msgs.forEach(m => {
+      const speaker = m.role === 'assistant'
+        ? (chat.mode === 'nodex' ? 'Nodex' : chat.persona?.name || 'Nomis')
+        : (state.user?.name || 'You');
+      const content = (typeof m.content === 'string' ? m.content : '[image]').replace('\n[Image attached]', '');
+      lines.push(`**${speaker}**`, '', content, '');
+    });
+    const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
+    downloadBlob(blob, `${slugify(title)}.md`);
+    showToast('Exported as Markdown ✦');
+
+  } else if (format === 'html') {
+    const msgHtml = msgs.map(m => {
+      const speaker = m.role === 'assistant'
+        ? (chat.mode === 'nodex' ? 'Nodex' : chat.persona?.name || 'Nomis')
+        : (state.user?.name || 'You');
+      const content = (typeof m.content === 'string' ? m.content : '[image]').replace('\n[Image attached]', '');
+      const isAI = m.role === 'assistant';
+      return `
+        <div class="msg ${isAI ? 'ai' : 'user'}">
+          <div class="speaker">${escHtml(speaker)}</div>
+          <div class="bubble">${isAI ? renderMarkdown(content) : escHtml(content).replace(/\n/g,'<br>')}</div>
+        </div>`;
+    }).join('');
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>${escHtml(title)}</title>
+<style>
+  body{font-family:Georgia,serif;max-width:720px;margin:40px auto;padding:0 20px;background:#0a0812;color:#f5f0dc;line-height:1.7;}
+  h1{font-family:serif;color:#b8960c;border-bottom:1px solid rgba(184,150,12,0.3);padding-bottom:12px;}
+  .meta{color:rgba(245,240,220,0.4);font-size:13px;margin-bottom:32px;}
+  .msg{margin-bottom:24px;}
+  .speaker{font-size:11px;letter-spacing:2px;text-transform:uppercase;color:rgba(184,150,12,0.7);margin-bottom:6px;}
+  .bubble{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:14px 18px;}
+  .msg.user .bubble{background:rgba(184,150,12,0.07);border-color:rgba(184,150,12,0.15);}
+  pre{background:rgba(0,0,0,0.4);border-radius:8px;padding:12px 16px;overflow-x:auto;}
+  code{font-family:monospace;font-size:13px;}
+  strong{color:#e8d8a0;}
+</style>
+</head>
+<body>
+<h1>${escHtml(title)}</h1>
+<div class="meta">Exported from Nomis AI · ${date}</div>
+${msgHtml}
+</body>
+</html>`;
+    const blob = new Blob([html], { type: 'text/html' });
+    downloadBlob(blob, `${slugify(title)}.html`);
+    showToast('Exported as HTML ✦');
+  }
+}
+
+function downloadBlob(blob, filename) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+function slugify(str) {
+  return str.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 50);
+}
+
+function openExportMenu() {
+  if ($('export-menu-popup')) { $('export-menu-popup').remove(); return; }
+  const popup = document.createElement('div');
+  popup.id = 'export-menu-popup';
+  popup.style.cssText = `
+    position:fixed;bottom:80px;right:20px;
+    background:linear-gradient(160deg,var(--ink-mid),var(--ink));
+    border:1px solid rgba(184,150,12,0.35);border-radius:12px;
+    padding:8px;z-index:9000;min-width:180px;
+    box-shadow:0 20px 60px rgba(0,0,0,0.8);
+    animation:authIn 0.15s ease forwards;
+  `;
+  popup.innerHTML = `
+    <div style="font-family:'Cinzel',serif;font-size:8px;letter-spacing:2px;color:var(--gold-dim);padding:6px 10px 8px;text-transform:uppercase;">Export Chat As</div>
+    <button class="export-opt-btn" id="export-md">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+      Markdown (.md)
+    </button>
+    <button class="export-opt-btn" id="export-html">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+      HTML File (.html)
+    </button>`;
+
+  /* Style the buttons */
+  if (!$('export-opt-style')) {
+    const s = document.createElement('style');
+    s.id = 'export-opt-style';
+    s.textContent = `.export-opt-btn{display:flex;align-items:center;gap:8px;width:100%;padding:9px 12px;background:none;border:none;border-radius:8px;color:var(--cream);font-family:'EB Garamond',serif;font-size:14px;cursor:pointer;transition:background 0.15s;text-align:left;}.export-opt-btn:hover{background:rgba(184,150,12,0.1);}`;
+    document.head.appendChild(s);
+  }
+
+  document.body.appendChild(popup);
+  $('export-md').addEventListener('click', () => { exportChat('markdown'); popup.remove(); });
+  $('export-html').addEventListener('click', () => { exportChat('html'); popup.remove(); });
+
+  const close = e => { if (!popup.contains(e.target)) { popup.remove(); document.removeEventListener('click', close); } };
+  setTimeout(() => document.addEventListener('click', close), 100);
+}
+/* ════════════════════════════════════════
+   API KEY MODAL
+════════════════════════════════════════ */
+async function openApiKeyModal() {
+  if ($('apikey-overlay')) { $('apikey-overlay').remove(); return; }
+  const overlay = document.createElement('div');
+  overlay.id = 'apikey-overlay';
+  overlay.style.cssText = `
+    position:fixed;inset:0;background:rgba(5,4,10,0.88);backdrop-filter:blur(10px);
+    z-index:15000;display:flex;align-items:center;justify-content:center;
+    animation:authIn 0.2s ease forwards;
+  `;
+
+  const key = await UserApiKeys.getOrCreate(state.user.uid);
+  const stats = await UserApiKeys.getStats(state.user.uid);
+
+  overlay.innerHTML = `
+    <div style="
+      width:min(500px,calc(100vw - 32px));
+      background:linear-gradient(160deg,var(--ink-mid),var(--ink));
+      border:1px solid rgba(184,150,12,0.4);border-radius:20px;
+      box-shadow:0 40px 100px rgba(0,0,0,0.9);padding:28px;
+      display:flex;flex-direction:column;gap:18px;
+    ">
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <span style="font-family:'Cinzel',serif;font-size:12px;font-weight:700;letter-spacing:2px;color:var(--gold);">✦ Your Nomis API Key</span>
+        <button id="apikey-close" style="width:28px;height:28px;border-radius:50%;border:1px solid var(--ink-border);background:transparent;color:var(--gold-dim);cursor:pointer;font-size:16px;">×</button>
+      </div>
+
+      <div style="font-family:'EB Garamond',serif;font-size:14px;color:rgba(245,240,220,0.6);line-height:1.6;">
+        Share this key with others or use it in your own projects. Every time someone uses your key, you earn <strong style="color:var(--gold);">100 Nomits</strong>.
+      </div>
+
+      <div style="background:var(--ink);border:1px solid rgba(184,150,12,0.25);border-radius:10px;padding:14px 16px;">
+        <div style="font-family:'Cinzel',serif;font-size:8px;letter-spacing:2px;color:var(--gold-dim);margin-bottom:8px;text-transform:uppercase;">Your API Key</div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <code id="apikey-value" style="flex:1;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--cream);word-break:break-all;">${escHtml(key || 'Generating…')}</code>
+          <button id="apikey-copy" class="action-btn" style="flex-shrink:0;color:var(--gold);border-color:rgba(184,150,12,0.4);">Copy</button>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div style="background:rgba(184,150,12,0.07);border:1px solid rgba(184,150,12,0.15);border-radius:10px;padding:14px;text-align:center;">
+          <div style="font-family:'Cinzel',serif;font-size:20px;font-weight:700;color:var(--gold);">${stats.uses.toLocaleString()}</div>
+          <div style="font-family:'Cinzel',serif;font-size:9px;letter-spacing:1.5px;color:var(--gold-dim);margin-top:4px;text-transform:uppercase;">Total Uses</div>
+        </div>
+        <div style="background:rgba(184,150,12,0.07);border:1px solid rgba(184,150,12,0.15);border-radius:10px;padding:14px;text-align:center;">
+          <div style="font-family:'Cinzel',serif;font-size:20px;font-weight:700;color:var(--gold);">${stats.earned.toLocaleString()}</div>
+          <div style="font-family:'Cinzel',serif;font-size:9px;letter-spacing:1.5px;color:var(--gold-dim);margin-top:4px;text-transform:uppercase;">Nomits Earned</div>
+        </div>
+      </div>
+
+      <div style="background:rgba(184,150,12,0.05);border:1px solid rgba(184,150,12,0.12);border-radius:10px;padding:14px 16px;">
+        <div style="font-family:'Cinzel',serif;font-size:8px;letter-spacing:2px;color:var(--gold-dim);margin-bottom:8px;text-transform:uppercase;">How to use in a project</div>
+        <pre style="margin:0;font-family:'JetBrains Mono',monospace;font-size:11px;color:rgba(245,240,220,0.7);white-space:pre-wrap;line-height:1.6;">POST https://api.nomis.app/v1/chat
+Authorization: Bearer ${escHtml(key || '')}
+Content-Type: application/json
+
+{ "message": "Hello Nomis" }</pre>
+      </div>
+
+      <div style="font-family:'EB Garamond',serif;font-size:12px;color:rgba(245,240,220,0.35);font-style:italic;">
+        Keep this key private. Nomits are credited to your account per verified use.
+      </div>
+    </div>`;
+
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  $('apikey-close').addEventListener('click', () => overlay.remove());
+  $('apikey-copy').addEventListener('click', () => {
+    navigator.clipboard.writeText(key || '').then(() => {
+      $('apikey-copy').textContent = 'Copied!';
+      setTimeout(() => $('apikey-copy').textContent = 'Copy', 2000);
+    });
+  });
+}
+
+/* ════════════════════════════════════════
+   REFERRAL MODAL
+════════════════════════════════════════ */
+async function openReferralModal() {
+  if ($('referral-overlay')) { $('referral-overlay').remove(); return; }
+  const overlay = document.createElement('div');
+  overlay.id = 'referral-overlay';
+  overlay.style.cssText = `
+    position:fixed;inset:0;background:rgba(5,4,10,0.88);backdrop-filter:blur(10px);
+    z-index:15000;display:flex;align-items:center;justify-content:center;
+    animation:authIn 0.2s ease forwards;
+  `;
+
+  const myCode = await Referrals.getOrCreateCode(state.user.uid);
+
+  overlay.innerHTML = `
+    <div style="
+      width:min(480px,calc(100vw - 32px));
+      background:linear-gradient(160deg,var(--ink-mid),var(--ink));
+      border:1px solid rgba(184,150,12,0.4);border-radius:20px;
+      box-shadow:0 40px 100px rgba(0,0,0,0.9);padding:28px;
+      display:flex;flex-direction:column;gap:18px;
+    ">
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <span style="font-family:'Cinzel',serif;font-size:12px;font-weight:700;letter-spacing:2px;color:var(--gold);">✦ Referrals</span>
+        <button id="referral-close" style="width:28px;height:28px;border-radius:50%;border:1px solid var(--ink-border);background:transparent;color:var(--gold-dim);cursor:pointer;font-size:16px;">×</button>
+      </div>
+
+      <div style="font-family:'EB Garamond',serif;font-size:15px;color:rgba(245,240,220,0.65);line-height:1.7;">
+        Share your code. When a friend enters it, <strong style="color:var(--gold);">you both get 500 Nomits</strong> — instantly.
+      </div>
+
+      <div style="background:var(--ink);border:1px solid rgba(184,150,12,0.25);border-radius:10px;padding:16px;">
+        <div style="font-family:'Cinzel',serif;font-size:8px;letter-spacing:2px;color:var(--gold-dim);margin-bottom:10px;text-transform:uppercase;">Your Referral Code</div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div style="flex:1;font-family:'Cinzel',serif;font-size:22px;font-weight:700;letter-spacing:4px;color:var(--gold);">${escHtml(myCode || '…')}</div>
+          <button id="ref-copy-btn" class="action-btn" style="color:var(--gold);border-color:rgba(184,150,12,0.4);flex-shrink:0;">Copy</button>
+        </div>
+      </div>
+
+      <div style="border-top:1px solid rgba(184,150,12,0.12);padding-top:16px;">
+        <div style="font-family:'Cinzel',serif;font-size:9px;letter-spacing:2px;color:var(--gold-dim);margin-bottom:10px;text-transform:uppercase;">Enter a Friend's Code</div>
+        <div style="display:flex;gap:8px;">
+          <input id="ref-input" type="text" placeholder="e.g. AB12CD34" maxlength="8" style="
+            flex:1;padding:10px 14px;background:var(--ink);
+            border:1px solid rgba(184,150,12,0.25);border-radius:8px;
+            color:var(--cream);font-family:'Cinzel',serif;font-size:14px;
+            letter-spacing:3px;outline:none;text-transform:uppercase;
+          "/>
+          <button id="ref-redeem-btn" style="
+            padding:10px 18px;font-family:'Cinzel',serif;font-size:10px;
+            font-weight:700;letter-spacing:2px;border-radius:8px;border:none;
+            background:linear-gradient(135deg,var(--gold),#D4A017);
+            color:var(--obsidian);cursor:pointer;white-space:nowrap;
+          ">Redeem</button>
+        </div>
+        <div id="ref-msg" style="font-family:'EB Garamond',serif;font-size:13px;margin-top:8px;min-height:18px;"></div>
+      </div>
+    </div>`;
+
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  $('referral-close').addEventListener('click', () => overlay.remove());
+
+  $('ref-copy-btn').addEventListener('click', () => {
+    navigator.clipboard.writeText(myCode || '').then(() => {
+      $('ref-copy-btn').textContent = 'Copied!';
+      setTimeout(() => $('ref-copy-btn').textContent = 'Copy', 2000);
+    });
+  });
+
+  $('ref-input').addEventListener('input', () => {
+    $('ref-input').value = $('ref-input').value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  });
+
+  $('ref-redeem-btn').addEventListener('click', async () => {
+    const code = $('ref-input').value.trim();
+    const msgEl = $('ref-msg');
+    $('ref-redeem-btn').disabled = true; $('ref-redeem-btn').style.opacity = '0.6';
+    msgEl.style.color = 'rgba(245,240,220,0.5)';
+    msgEl.textContent = 'Checking code…';
+
+    const result = await Referrals.redeem(state.user.uid, code);
+    $('ref-redeem-btn').disabled = false; $('ref-redeem-btn').style.opacity = '';
+
+    if (result.ok) {
+      msgEl.style.color = '#4dbb7f';
+      msgEl.textContent = `✦ Success! 500 Nomits added to your balance.`;
+      state.nomits = await Nomits.getBalance(state.user.uid);
+      renderNomitsUI();
+      $('ref-input').value = '';
+    } else {
+      msgEl.style.color = 'rgba(255,107,107,0.8)';
+      msgEl.textContent = result.msg;
+    }
   });
 }
 
