@@ -707,6 +707,206 @@ const ImageGen = {
     await this._loadImage(card, prompt, url, 'display:block;width:100%;max-height:480px;object-fit:cover;');
   }
 };
+/* ════════════════════════════════════════
+   AI DETECTION SYSTEM
+════════════════════════════════════════ */
+const AIDetector = {
+  async analyzeText(text) {
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+        'HTTP-Referer': APP_URL,
+        'X-Title': 'Nomis AI',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        max_tokens: 400,
+        temperature: 0.1,
+        messages: [{
+          role: 'user',
+          content: `You are an expert forensic AI detection system. Analyse the following text and determine the probability it was written by an AI vs a human. 
+
+Return ONLY a valid JSON object in this exact format, nothing else:
+{
+  "verdict": "AI-Generated" | "Likely AI" | "Uncertain" | "Likely Human" | "Human-Written",
+  "confidence": <0-100 integer>,
+  "ai_probability": <0-100 integer>,
+  "signals": ["signal 1", "signal 2", "signal 3"],
+  "reasoning": "One sentence explanation."
+}
+
+Text to analyse:
+"""
+${text.slice(0, 3000)}
+"""`
+        }]
+      })
+    });
+    const data = await response.json();
+    const raw = data.choices?.[0]?.message?.content || '{}';
+    try {
+      return JSON.parse(raw.replace(/```json|```/g, '').trim());
+    } catch { return null; }
+  },
+
+  async analyzeImage(base64, mimeType) {
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+        'HTTP-Referer': APP_URL,
+        'X-Title': 'Nomis AI',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        max_tokens: 400,
+        temperature: 0.1,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64}` } },
+            { type: 'text', text: `You are an expert AI image detection system. Analyse this image for signs it was AI-generated (by Midjourney, DALL-E, Stable Diffusion, Flux, etc.) vs photographed or hand-made by a human.
+
+Return ONLY a valid JSON object in this exact format, nothing else:
+{
+  "verdict": "AI-Generated" | "Likely AI" | "Uncertain" | "Likely Human" | "Human-Taken",
+  "confidence": <0-100 integer>,
+  "ai_probability": <0-100 integer>,
+  "signals": ["signal 1", "signal 2", "signal 3"],
+  "reasoning": "One sentence explanation."
+}` }
+          ]
+        }]
+      })
+    });
+    const data = await response.json();
+    const raw = data.choices?.[0]?.message?.content || '{}';
+    try {
+      return JSON.parse(raw.replace(/```json|```/g, '').trim());
+    } catch { return null; }
+  },
+
+  renderResult(result) {
+    if (!result) return '<div style="color:rgba(255,107,107,0.8);font-family:EB Garamond,serif;font-size:14px;">Detection failed. Please try again.</div>';
+    const pct = result.ai_probability ?? 0;
+    const colorMap = {
+      'AI-Generated': '#ff6b6b',
+      'Likely AI':    '#ffaa4d',
+      'Uncertain':    '#b8960c',
+      'Likely Human': '#4dbb7f',
+      'Human-Written':'#4dbb7f',
+      'Human-Taken':  '#4dbb7f',
+    };
+    const color = colorMap[result.verdict] || '#b8960c';
+    const barColor = pct > 70 ? '#ff6b6b' : pct > 40 ? '#ffaa4d' : '#4dbb7f';
+
+    return `
+      <div style="
+        margin-top:12px;padding:16px 18px;
+        background:rgba(10,8,18,0.6);
+        border:1px solid rgba(184,150,12,0.2);
+        border-radius:12px;font-family:'Cinzel',serif;
+      ">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
+          <span style="font-size:9px;letter-spacing:2px;color:var(--gold-dim);text-transform:uppercase;">AI Detection Result</span>
+          <span style="
+            font-size:10px;font-weight:700;letter-spacing:1.5px;
+            padding:4px 12px;border-radius:20px;
+            background:${color}18;color:${color};
+            border:1px solid ${color}40;
+          ">${result.verdict}</span>
+        </div>
+        <div style="margin-bottom:12px;">
+          <div style="display:flex;justify-content:space-between;margin-bottom:5px;">
+            <span style="font-size:9px;letter-spacing:1.5px;color:var(--gold-dim);">AI PROBABILITY</span>
+            <span style="font-size:11px;font-weight:700;color:${barColor};">${pct}%</span>
+          </div>
+          <div style="height:4px;background:rgba(255,255,255,0.08);border-radius:4px;overflow:hidden;">
+            <div style="height:100%;width:${pct}%;background:${barColor};border-radius:4px;transition:width 0.8s ease;"></div>
+          </div>
+        </div>
+        <div style="margin-bottom:10px;">
+          ${result.signals?.map(s => `<div style="font-family:'EB Garamond',serif;font-size:12px;color:rgba(245,240,220,0.65);padding:2px 0;">✦ ${s}</div>`).join('') || ''}
+        </div>
+        <div style="font-family:'EB Garamond',serif;font-size:13px;color:rgba(245,240,220,0.5);font-style:italic;border-top:1px solid rgba(184,150,12,0.1);padding-top:8px;">
+          ${result.reasoning || ''}
+        </div>
+      </div>`;
+  }
+};
+/* ════════════════════════════════════════
+   IMAGE EDITOR — Pollinations img2img
+════════════════════════════════════════ */
+const ImageEditor = {
+  buildEditUrl(imageUrl, editPrompt) {
+    const encoded = encodeURIComponent(editPrompt);
+    const imgEncoded = encodeURIComponent(imageUrl);
+    const seed = Math.floor(Math.random() * 999999);
+    return `https://image.pollinations.ai/prompt/${encoded}?width=512&height=512&seed=${seed}&nologo=true&model=turbo&image=${imgEncoded}`;
+  },
+
+  openEditor(originalSrc, bubble) {
+    if ($('img-editor-panel')) { $('img-editor-panel').remove(); return; }
+
+    const panel = document.createElement('div');
+    panel.id = 'img-editor-panel';
+    panel.style.cssText = `
+      margin-top:12px;padding:14px 16px;
+      background:rgba(10,8,18,0.7);
+      border:1px solid rgba(184,150,12,0.25);
+      border-radius:12px;
+    `;
+    panel.innerHTML = `
+      <div style="font-family:'Cinzel',serif;font-size:9px;letter-spacing:2px;color:var(--gold-dim);margin-bottom:10px;text-transform:uppercase;">Edit Image</div>
+      <div style="display:flex;gap:8px;align-items:flex-start;">
+        <textarea id="img-edit-prompt" rows="2" placeholder="Describe the changes… e.g. make it a sunset, add snow, oil painting style" style="
+          flex:1;padding:9px 12px;background:var(--ink);
+          border:1px solid rgba(184,150,12,0.3);border-radius:8px;
+          color:var(--cream);font-family:'EB Garamond',serif;font-size:14px;
+          outline:none;resize:none;line-height:1.5;
+        "></textarea>
+        <button id="img-edit-go" class="action-btn" style="color:var(--gold);border-color:rgba(184,150,12,0.5);flex-shrink:0;white-space:nowrap;">
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="5 12 19 12"/><polyline points="12 5 19 12 12 19"/></svg>
+          Apply
+        </button>
+      </div>
+      <div id="img-edit-result" style="margin-top:10px;"></div>
+    `;
+    bubble.appendChild(panel);
+
+    $('img-edit-go').addEventListener('click', async () => {
+      const prompt = $('img-edit-prompt').value.trim();
+      if (!prompt) return;
+      const resultDiv = $('img-edit-result');
+      const goBtn = $('img-edit-go');
+      goBtn.disabled = true; goBtn.style.opacity = '0.5';
+      resultDiv.innerHTML = `
+        <div style="display:flex;align-items:center;gap:8px;font-family:'Cinzel',serif;font-size:10px;letter-spacing:1.5px;color:var(--gold-dim);padding:8px 0;">
+          <div style="width:16px;height:16px;border:1.5px solid rgba(184,150,12,0.2);border-top-color:var(--gold);border-radius:50%;animation:spin 0.8s linear infinite;flex-shrink:0;"></div>
+          Applying edits…
+        </div>`;
+      scrollToBottom();
+
+      try {
+        const editUrl = this.buildEditUrl(originalSrc, prompt);
+        const card = document.createElement('div');
+        card.style.cssText = 'border-radius:10px;overflow:hidden;border:1px solid rgba(184,150,12,0.2);margin-top:4px;';
+        resultDiv.innerHTML = '';
+        resultDiv.appendChild(card);
+        await ImageGen._loadImage(card, prompt, editUrl, 'display:block;width:100%;max-height:400px;object-fit:cover;');
+      } catch(e) {
+        resultDiv.innerHTML = `<div style="color:rgba(255,107,107,0.8);font-family:'EB Garamond',serif;font-size:13px;">Edit failed. Please try again.</div>`;
+      }
+      goBtn.disabled = false; goBtn.style.opacity = '';
+      scrollToBottom();
+    });
+
+    scrollToBottom();
+  }
+};
 
 /* ════════════════════════════════════════
    STREAM BAR
@@ -1996,6 +2196,26 @@ function wireAssistantActions(row, content, msgIndex) {
   const timeDiv = contentDiv.querySelector('.msg-time');
   if (timeDiv) contentDiv.insertBefore(actions, timeDiv);
   else contentDiv.appendChild(actions);
+   const detectAiBtn = document.createElement('button');
+detectAiBtn.className = 'action-btn';
+detectAiBtn.title = 'Detect if AI-written';
+detectAiBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><path d="M11 8v3l2 2"/></svg> Detect`;
+detectAiBtn.addEventListener('click', async () => {
+  detectAiBtn.disabled = true; detectAiBtn.style.opacity = '0.5';
+  detectAiBtn.textContent = 'Analysing…';
+  const plainText = bubble.innerText;
+  const result = await AIDetector.analyzeText(plainText);
+  const existing = bubble.querySelector('.ai-detect-result');
+  if (existing) existing.remove();
+  const resultDiv = document.createElement('div');
+  resultDiv.className = 'ai-detect-result';
+  resultDiv.innerHTML = AIDetector.renderResult(result);
+  bubble.appendChild(resultDiv);
+  detectAiBtn.disabled = false; detectAiBtn.style.opacity = '';
+  detectAiBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg> Re-detect`;
+  scrollToBottom();
+});
+actions.appendChild(detectAiBtn);
 }
 
 /* ════════════════════════════════════════
@@ -2047,10 +2267,47 @@ function createMessageRow(role, content, imagePreview = null, msgIndex = null) {
   bubble.className = `msg-bubble ${role}`;
 
   if (imagePreview && role === 'user') {
-    const imgEl = document.createElement('img');
-    imgEl.src = imagePreview; imgEl.className = 'msg-image-preview';
-    bubble.appendChild(imgEl);
-  }
+  const imgEl = document.createElement('img');
+  imgEl.src = imagePreview; imgEl.className = 'msg-image-preview';
+  bubble.appendChild(imgEl);
+
+  /* Image action bar */
+  const imgActions = document.createElement('div');
+  imgActions.style.cssText = 'display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;';
+
+  /* Detect AI (image) */
+  const imgDetectBtn = document.createElement('button');
+  imgDetectBtn.className = 'action-btn';
+  imgDetectBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg> Detect AI`;
+  imgDetectBtn.addEventListener('click', async () => {
+    if (!state.pendingImage && !capturedImage) { showToast('Image data not available.'); return; }
+    imgDetectBtn.disabled = true; imgDetectBtn.style.opacity = '0.5';
+    imgDetectBtn.textContent = 'Analysing…';
+    const img = state.pendingImage || capturedImage;
+    const result = await AIDetector.analyzeImage(img.base64, img.mimeType);
+    const existing = bubble.querySelector('.ai-detect-result');
+    if (existing) existing.remove();
+    const resultDiv = document.createElement('div');
+    resultDiv.className = 'ai-detect-result';
+    resultDiv.innerHTML = AIDetector.renderResult(result);
+    bubble.appendChild(resultDiv);
+    imgDetectBtn.disabled = false; imgDetectBtn.style.opacity = '';
+    imgDetectBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg> Re-detect`;
+    scrollToBottom();
+  });
+
+  /* Edit image */
+  const imgEditBtn = document.createElement('button');
+  imgEditBtn.className = 'action-btn';
+  imgEditBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg> Edit Image`;
+  imgEditBtn.addEventListener('click', () => {
+    ImageEditor.openEditor(imagePreview, bubble);
+  });
+
+  imgActions.appendChild(imgDetectBtn);
+  imgActions.appendChild(imgEditBtn);
+  bubble.appendChild(imgActions);
+}
 
   const textContent = typeof content === 'string' ? content.replace('\n[Image attached]', '') : '';
   const textEl = document.createElement('div');
@@ -2074,24 +2331,42 @@ function createMessageRow(role, content, imagePreview = null, msgIndex = null) {
   }
 
   if (role === 'user') {
-    const capturedIndex = msgIndex !== null ? msgIndex : state.messages.length - 1;
-    const editActions = document.createElement('div');
-    editActions.className = 'msg-actions';
+  const capturedIndex = msgIndex !== null ? msgIndex : state.messages.length - 1;
+  const editActions = document.createElement('div');
+  editActions.className = 'msg-actions';
 
-    const editBtn = document.createElement('button');
-    editBtn.className = 'action-btn msg-edit-btn';
-    editBtn.title = 'Edit message';
-    editBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg> Edit`;
-    editBtn.addEventListener('click', () => enableMessageEditing(row, bubble, capturedIndex));
+  const editBtn = document.createElement('button');
+  editBtn.className = 'action-btn msg-edit-btn';
+  editBtn.title = 'Edit message';
+  editBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg> Edit`;
+  editBtn.addEventListener('click', () => enableMessageEditing(row, bubble, capturedIndex));
+  editActions.appendChild(editBtn);
 
-    editActions.appendChild(editBtn);
-    contentDiv.appendChild(editActions);
+  /* AI Detect button — shown for text messages */
+  const textContent = (typeof content === 'string' ? content : '').replace('\n[Image attached]', '').trim();
+  if (textContent.length > 30) {
+    const detectBtn = document.createElement('button');
+    detectBtn.className = 'action-btn';
+    detectBtn.title = 'Detect if AI-written';
+    detectBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><path d="M11 8v3l2 2"/></svg> Detect AI`;
+    detectBtn.addEventListener('click', async () => {
+      detectBtn.disabled = true; detectBtn.style.opacity = '0.5';
+      detectBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg> Analysing…`;
+      const result = await AIDetector.analyzeText(textContent);
+      const existing = bubble.querySelector('.ai-detect-result');
+      if (existing) existing.remove();
+      const resultDiv = document.createElement('div');
+      resultDiv.className = 'ai-detect-result';
+      resultDiv.innerHTML = AIDetector.renderResult(result);
+      bubble.appendChild(resultDiv);
+      detectBtn.disabled = false; detectBtn.style.opacity = '';
+      detectBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg> Re-detect`;
+      scrollToBottom();
+    });
+    editActions.appendChild(detectBtn);
   }
 
-  contentDiv.appendChild(timeDiv);
-  row.appendChild(avatarDiv);
-  row.appendChild(contentDiv);
-  return row;
+  contentDiv.appendChild(editActions);
 }
 
 /* ════════════════════════════════════════
