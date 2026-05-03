@@ -204,22 +204,32 @@ const UserApiKeys = {
 
   async getOrCreate(uid) {
     try {
+      /* Only read/write under users/${uid} — guaranteed to be allowed */
       const snap = await get(ref(db, `users/${uid}/apiKey`));
-      if (snap.exists()) return snap.val();
+      if (snap.exists() && snap.val()) return snap.val();
       const key = this._generate();
       await set(ref(db, `users/${uid}/apiKey`), key);
-      await set(ref(db, `userApiKeys/${key}`), { uid, createdAt: Date.now(), uses: 0 });
+      /* Also write stats under the user node */
+      await set(ref(db, `users/${uid}/apiKeyStats`), { uses: 0, earned: 0, createdAt: Date.now() });
       return key;
-    } catch { return null; }
+    } catch (e) {
+      console.error('API key error:', e);
+      return null;
+    }
   },
 
-  async recordUse(apiKey) {
-    /* Called when someone uses a user's API key — awards Nomits to the key owner */
+  async recordUse(apiKey, uid) {
     try {
-      const snap = await get(ref(db, `userApiKeys/${apiKey}`));
-      if (!snap.exists()) return false;
-      const { uid, uses } = snap.val();
-      await update(ref(db, `userApiKeys/${apiKey}`), { uses: (uses || 0) + 1, lastUsed: Date.now() });
+      const statsSnap = await get(ref(db, `users/${uid}/apiKeyStats`));
+      const stats = statsSnap.exists() ? statsSnap.val() : { uses: 0, earned: 0 };
+      const newUses = (stats.uses || 0) + 1;
+      const newEarned = (stats.earned || 0) + this.REWARD;
+      await set(ref(db, `users/${uid}/apiKeyStats`), {
+        uses: newUses,
+        earned: newEarned,
+        lastUsed: Date.now(),
+        createdAt: stats.createdAt || Date.now()
+      });
       await Nomits.add(uid, this.REWARD);
       return true;
     } catch { return false; }
@@ -227,13 +237,9 @@ const UserApiKeys = {
 
   async getStats(uid) {
     try {
-      const keySnap = await get(ref(db, `users/${uid}/apiKey`));
-      if (!keySnap.exists()) return { uses: 0, earned: 0 };
-      const key = keySnap.val();
-      const statsSnap = await get(ref(db, `userApiKeys/${key}`));
-      if (!statsSnap.exists()) return { uses: 0, earned: 0 };
-      const { uses } = statsSnap.val();
-      return { uses: uses || 0, earned: (uses || 0) * this.REWARD };
+      const snap = await get(ref(db, `users/${uid}/apiKeyStats`));
+      if (!snap.exists()) return { uses: 0, earned: 0 };
+      return snap.val();
     } catch { return { uses: 0, earned: 0 }; }
   }
 };
@@ -1648,6 +1654,7 @@ function openExportMenu() {
 ════════════════════════════════════════ */
 async function openApiKeyModal() {
   if ($('apikey-overlay')) { $('apikey-overlay').remove(); return; }
+
   const overlay = document.createElement('div');
   overlay.id = 'apikey-overlay';
   overlay.style.cssText = `
@@ -1656,9 +1663,7 @@ async function openApiKeyModal() {
     animation:authIn 0.2s ease forwards;
   `;
 
-  const key = await UserApiKeys.getOrCreate(state.user.uid);
-  const stats = await UserApiKeys.getStats(state.user.uid);
-
+  /* Show skeleton while loading */
   overlay.innerHTML = `
     <div style="
       width:min(500px,calc(100vw - 32px));
@@ -1671,51 +1676,89 @@ async function openApiKeyModal() {
         <span style="font-family:'Cinzel',serif;font-size:12px;font-weight:700;letter-spacing:2px;color:var(--gold);">✦ Your Nomis API Key</span>
         <button id="apikey-close" style="width:28px;height:28px;border-radius:50%;border:1px solid var(--ink-border);background:transparent;color:var(--gold-dim);cursor:pointer;font-size:16px;">×</button>
       </div>
-
-      <div style="font-family:'EB Garamond',serif;font-size:14px;color:rgba(245,240,220,0.6);line-height:1.6;">
-        Share this key with others or use it in your own projects. Every time someone uses your key, you earn <strong style="color:var(--gold);">100 Nomits</strong>.
-      </div>
-
-      <div style="background:var(--ink);border:1px solid rgba(184,150,12,0.25);border-radius:10px;padding:14px 16px;">
-        <div style="font-family:'Cinzel',serif;font-size:8px;letter-spacing:2px;color:var(--gold-dim);margin-bottom:8px;text-transform:uppercase;">Your API Key</div>
-        <div style="display:flex;align-items:center;gap:10px;">
-          <code id="apikey-value" style="flex:1;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--cream);word-break:break-all;">${escHtml(key || 'Generating…')}</code>
-          <button id="apikey-copy" class="action-btn" style="flex-shrink:0;color:var(--gold);border-color:rgba(184,150,12,0.4);">Copy</button>
-        </div>
-      </div>
-
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-        <div style="background:rgba(184,150,12,0.07);border:1px solid rgba(184,150,12,0.15);border-radius:10px;padding:14px;text-align:center;">
-          <div style="font-family:'Cinzel',serif;font-size:20px;font-weight:700;color:var(--gold);">${stats.uses.toLocaleString()}</div>
-          <div style="font-family:'Cinzel',serif;font-size:9px;letter-spacing:1.5px;color:var(--gold-dim);margin-top:4px;text-transform:uppercase;">Total Uses</div>
-        </div>
-        <div style="background:rgba(184,150,12,0.07);border:1px solid rgba(184,150,12,0.15);border-radius:10px;padding:14px;text-align:center;">
-          <div style="font-family:'Cinzel',serif;font-size:20px;font-weight:700;color:var(--gold);">${stats.earned.toLocaleString()}</div>
-          <div style="font-family:'Cinzel',serif;font-size:9px;letter-spacing:1.5px;color:var(--gold-dim);margin-top:4px;text-transform:uppercase;">Nomits Earned</div>
-        </div>
-      </div>
-
-      <div style="background:rgba(184,150,12,0.05);border:1px solid rgba(184,150,12,0.12);border-radius:10px;padding:14px 16px;">
-        <div style="font-family:'Cinzel',serif;font-size:8px;letter-spacing:2px;color:var(--gold-dim);margin-bottom:8px;text-transform:uppercase;">How to use in a project</div>
-        <pre style="margin:0;font-family:'JetBrains Mono',monospace;font-size:11px;color:rgba(245,240,220,0.7);white-space:pre-wrap;line-height:1.6;">POST https://api.nomis.app/v1/chat
-Authorization: Bearer ${escHtml(key || '')}
-Content-Type: application/json
-
-{ "message": "Hello Nomis" }</pre>
-      </div>
-
-      <div style="font-family:'EB Garamond',serif;font-size:12px;color:rgba(245,240,220,0.35);font-style:italic;">
-        Keep this key private. Nomits are credited to your account per verified use.
+      <div id="apikey-body" style="display:flex;align-items:center;justify-content:center;padding:32px 0;">
+        <div style="
+          width:22px;height:22px;border:2px solid rgba(184,150,12,0.15);
+          border-top-color:var(--gold);border-radius:50%;
+          animation:spin 0.8s linear infinite;
+        "></div>
       </div>
     </div>`;
 
   document.body.appendChild(overlay);
   overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
   $('apikey-close').addEventListener('click', () => overlay.remove());
+
+  /* Now fetch — guaranteed to show spinner while awaiting */
+  let key = null;
+  let stats = { uses: 0, earned: 0 };
+  try {
+    key = await UserApiKeys.getOrCreate(state.user.uid);
+    stats = await UserApiKeys.getStats(state.user.uid);
+  } catch (e) {
+    console.error('Failed to load API key:', e);
+  }
+
+  const body = $('apikey-body');
+  if (!body) return; /* modal was closed while loading */
+
+  if (!key) {
+    body.innerHTML = `
+      <div style="font-family:'EB Garamond',serif;font-size:14px;color:rgba(255,107,107,0.8);text-align:center;padding:16px 0;">
+        Failed to generate API key.<br>
+        <button onclick="document.getElementById('apikey-overlay').remove();openApiKeyModal();" 
+          class="action-btn" style="margin-top:12px;color:var(--gold);border-color:rgba(184,150,12,0.4);">
+          Try Again
+        </button>
+      </div>`;
+    return;
+  }
+
+  body.innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:16px;width:100%;">
+      <div style="font-family:'EB Garamond',serif;font-size:14px;color:rgba(245,240,220,0.6);line-height:1.6;">
+        Share this key with others or use it in your projects. Every verified use earns you
+        <strong style="color:var(--gold);">100 Nomits</strong>.
+      </div>
+
+      <div style="background:var(--ink);border:1px solid rgba(184,150,12,0.25);border-radius:10px;padding:14px 16px;">
+        <div style="font-family:'Cinzel',serif;font-size:8px;letter-spacing:2px;color:var(--gold-dim);margin-bottom:8px;text-transform:uppercase;">API Key</div>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <code id="apikey-value" style="flex:1;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--cream);word-break:break-all;min-width:0;">${escHtml(key)}</code>
+          <button id="apikey-copy" class="action-btn" style="flex-shrink:0;color:var(--gold);border-color:rgba(184,150,12,0.4);">Copy</button>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div style="background:rgba(184,150,12,0.07);border:1px solid rgba(184,150,12,0.15);border-radius:10px;padding:14px;text-align:center;">
+          <div style="font-family:'Cinzel',serif;font-size:24px;font-weight:700;color:var(--gold);">${(stats.uses || 0).toLocaleString()}</div>
+          <div style="font-family:'Cinzel',serif;font-size:9px;letter-spacing:1.5px;color:var(--gold-dim);margin-top:4px;text-transform:uppercase;">Total Uses</div>
+        </div>
+        <div style="background:rgba(184,150,12,0.07);border:1px solid rgba(184,150,12,0.15);border-radius:10px;padding:14px;text-align:center;">
+          <div style="font-family:'Cinzel',serif;font-size:24px;font-weight:700;color:var(--gold);">${(stats.earned || 0).toLocaleString()}</div>
+          <div style="font-family:'Cinzel',serif;font-size:9px;letter-spacing:1.5px;color:var(--gold-dim);margin-top:4px;text-transform:uppercase;">Nomits Earned</div>
+        </div>
+      </div>
+
+      <div style="background:rgba(184,150,12,0.05);border:1px solid rgba(184,150,12,0.12);border-radius:10px;padding:14px 16px;">
+        <div style="font-family:'Cinzel',serif;font-size:8px;letter-spacing:2px;color:var(--gold-dim);margin-bottom:8px;text-transform:uppercase;">Usage Example</div>
+        <pre style="margin:0;font-family:'JetBrains Mono',monospace;font-size:11px;color:rgba(245,240,220,0.65);white-space:pre-wrap;line-height:1.7;">fetch('https://openrouter.ai/api/v1/chat/completions', {
+  headers: {
+    'Authorization': 'Bearer ${escHtml(key)}',
+    'X-Nomis-Key': '${escHtml(key)}'
+  }
+})</pre>
+      </div>
+
+      <div style="font-family:'EB Garamond',serif;font-size:12px;color:rgba(245,240,220,0.3);font-style:italic;">
+        Keep this key private. It is permanently linked to your account.
+      </div>
+    </div>`;
+
   $('apikey-copy').addEventListener('click', () => {
-    navigator.clipboard.writeText(key || '').then(() => {
+    navigator.clipboard.writeText(key).then(() => {
       $('apikey-copy').textContent = 'Copied!';
-      setTimeout(() => $('apikey-copy').textContent = 'Copy', 2000);
+      setTimeout(() => { if ($('apikey-copy')) $('apikey-copy').textContent = 'Copy'; }, 2000);
     });
   });
 }
