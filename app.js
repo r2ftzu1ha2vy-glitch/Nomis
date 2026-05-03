@@ -2366,8 +2366,14 @@ function createMessageRow(role, content, imagePreview = null, msgIndex = null) {
     editActions.appendChild(detectBtn);
   }
 
-  contentDiv.appendChild(editActions);
-}
+contentDiv.appendChild(editActions);
+  }  // closes if (role === 'user')
+
+  contentDiv.appendChild(timeDiv);
+  row.appendChild(avatarDiv);
+  row.appendChild(contentDiv);
+  return row;
+}  // closes createMessageRow
 
 /* ════════════════════════════════════════
    MARKDOWN RENDERER
