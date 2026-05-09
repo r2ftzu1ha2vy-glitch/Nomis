@@ -8,7 +8,7 @@
    Firebase Auth + Realtime Database
    ============================================================ */
 
-const OPENROUTER_API_KEY = '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';
+const OPENROUTER_API_KEY = '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';
 const MODEL = 'anthropic/claude-3-haiku';
 const APP_URL = window.location.href;
 
