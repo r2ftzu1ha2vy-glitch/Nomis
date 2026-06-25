@@ -108,13 +108,11 @@ const MODEL_CREATOR       = 'gryphe/mythomax-l2-13b';       // owner account
 const MODEL_IMAGE         = 'openai/gpt-image-1';
 const MODEL_IMAGE_CREATOR = 'google/gemini-3-pro-image';  // same for now until you confirm credits cover it
 
-function getActiveModel() {
-  if (state?.user?.email === OWNER_EMAIL) return MODEL_CREATOR;
-  return MODEL_DEFAULT;
-}
-function getActiveImageModel() {
-  if (state?.user?.email === OWNER_EMAIL) return MODEL_IMAGE_CREATOR;
-  return MODEL_IMAGE;
+function getActiveModel(hasImage = false) {
+  if (state?.user?.email === OWNER_EMAIL) {
+    return hasImage ? 'google/gemini-2.5-pro-preview' : 'gryphe/mythomax-l2-13b';
+  }
+  return hasImage ? 'google/gemini-2.5-flash-preview' : 'google/gemini-flash-1.5';
 }
 
 const APP_URL = window.location.href;
@@ -2200,8 +2198,8 @@ function buildUserContent(text, imageData) {
 /* ════════════════════════════════════════
    CORE API CALL — with multi-key fallback
 ════════════════════════════════════════ */
-async function streamCompletion({ messages, targetBubble, onDone, onError }) {
-  const model = getActiveModel();
+async function streamCompletion({ messages, targetBubble, hasImage = false, onDone, onError }) {
+  const model = getActiveModel(hasImage);
   const maxTokens = state.isDegraded ? 300 : 1024;
   const temperature = state.isDegraded ? 0.5 : (state.mode === 'nodex' ? 0.2 : 0.8);
 
@@ -2377,6 +2375,7 @@ async function sendMessage() {
 
   try {
     const { systemPrompt, assistantIntro } = buildSystemMessages();
+     const fullContent = await streamCompletion({ messages, targetBubble: bubbleEl, hasImage: !!capturedImage });
     const historyMessages = state.messages.slice(0, -1).map(m => ({
       role: m.role,
       content: typeof m.content === 'string' ? m.content.replace('\n[Image attached]', '[image was attached to this message]') : m.content
