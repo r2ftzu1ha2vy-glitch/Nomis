@@ -106,8 +106,8 @@ async function fetchWithKeyFallback(url, buildOptions) {
 /* ── Dynamic model selection ── */
 const MODEL_DEFAULT       = 'google/gemini-flash-1.5';      // standard users
 const MODEL_CREATOR       = 'gryphe/mythomax-l2-13b';       // owner account
-const MODEL_IMAGE         = 'google/gemini-2.5-flash-preview-05-20:image';
-const MODEL_IMAGE_CREATOR = 'google/gemini-2.5-pro-preview:image';         // creator — best available
+const MODEL_IMAGE         = 'openai/gpt-image-1';           // standard — proven to work
+const MODEL_IMAGE_CREATOR = 'google/gemini-2.5-flash-image'; // creator — Nano Banana
 
 function getActiveModel() {
   if (state?.user?.email === OWNER_EMAIL) return MODEL_CREATOR;
@@ -941,11 +941,8 @@ const ImageGen = {
    * Automatically rotates through the key pool on credit errors.
    */
 async _generateViaAPI(prompt) {
-  const imageModel = getActiveImageModel();
-  
-  // Try the dedicated images endpoint first (required for Gemini/Nano Banana models)
   const response = await fetchWithKeyFallback(
-    'https://openrouter.ai/api/v1/images/generations',
+    'https://openrouter.ai/api/v1/chat/completions',
     (key) => ({
       method: 'POST',
       headers: {
@@ -955,23 +952,50 @@ async _generateViaAPI(prompt) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: imageModel,
-        prompt: `Photorealistic, highly detailed, visually stunning. Professional photography or digital art quality. Perfect lighting, composition, textures, and fine details. Subject: ${prompt}`,
-        n: 1,
-        size: '1024x1024',
+        model: getActiveImageModel(),
+        messages: [{
+          role: 'user',
+          content: [{
+            type: 'text',
+            text: `Generate a photorealistic, highly detailed, visually stunning image. Professional photographer or digital artist quality. Perfect lighting, composition, textures, and fine details. Subject: ${prompt}`,
+          }],
+        }],
+        max_tokens: 4096,
+        modalities: ['image', 'text'],
       }),
     })
   );
 
   const data = await response.json();
+  const content = data.choices?.[0]?.message?.content;
+  if (!content) throw new Error('No content returned from API.');
 
-  // Standard images/generations response format
-  const imageData = data?.data?.[0];
-  if (!imageData) throw new Error('No image data returned from API.');
+  // Gemini image models return an array of blocks
+  if (Array.isArray(content)) {
+    for (const block of content) {
+      // Base64 image block
+      if (block.type === 'image_url') return block.image_url?.url;
+      if (block.type === 'image' && block.source?.data)
+        return `data:${block.source.media_type || 'image/png'};base64,${block.source.data}`;
+      // Some models return b64_json directly in a text block as JSON
+      if (block.type === 'text') {
+        try {
+          const parsed = JSON.parse(block.text);
+          if (parsed?.data?.[0]?.b64_json)
+            return `data:image/png;base64,${parsed.data[0].b64_json}`;
+          if (parsed?.data?.[0]?.url) return parsed.data[0].url;
+        } catch { /* not JSON, skip */ }
+        const urlMatch = block.text?.match(/https?:\/\/\S+\.(png|jpg|jpeg|webp)/i);
+        if (urlMatch) return urlMatch[0];
+      }
+    }
+  }
 
-  // Could be a URL or base64
-  if (imageData.url) return imageData.url;
-  if (imageData.b64_json) return `data:image/png;base64,${imageData.b64_json}`;
+  if (typeof content === 'string') {
+    if (content.startsWith('data:image')) return content;
+    const urlMatch = content.match(/https?:\/\/\S+/);
+    if (urlMatch) return urlMatch[0];
+  }
 
   throw new Error('Could not extract image from API response.');
 },
