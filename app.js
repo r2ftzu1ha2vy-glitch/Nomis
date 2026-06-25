@@ -972,38 +972,20 @@ const ImageGen = {
    * Automatically rotates through the key pool on credit errors.
    */
 async _generateViaAPI(prompt) {
-  const key = getActiveKey(); // use key directly, bypass fallback for images
-  const response = await fetch('https://openrouter.ai/api/v1/images', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${key}`,
-      'HTTP-Referer': APP_URL,
-      'X-Title': 'Nomis AI',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: getActiveImageModel(),
-      prompt: `Photorealistic, highly detailed, visually stunning. Professional photography or digital art quality. Perfect lighting, composition, textures, and fine details. Subject: ${prompt}`,
-      quality: 'high',
-      output_format: 'png',
-    }),
+  const enhancedPrompt = `Photorealistic, highly detailed, visually stunning, professional photography quality, perfect lighting and composition. ${prompt}`;
+  const encoded = encodeURIComponent(enhancedPrompt);
+  const seed = Math.floor(Math.random() * 999999);
+  const isCreator = state?.user?.email === OWNER_EMAIL;
+  const model = isCreator ? 'flux-pro' : 'flux';
+  const url = `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=1024&seed=${seed}&nologo=true&model=${model}&enhance=true`;
+
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const timeout = setTimeout(() => reject(new Error('Generation timed out after 60s')), 60000);
+    img.onload = () => { clearTimeout(timeout); resolve(url); };
+    img.onerror = () => { clearTimeout(timeout); reject(new Error('Pollinations generation failed')); };
+    img.src = url;
   });
-
-  const data = await response.json();
-  console.log('[ImageGen] status:', response.status, 'body:', JSON.stringify(data).slice(0, 400));
-
-  if (!response.ok) {
-    const errMsg = data?.error?.message || data?.message || `HTTP ${response.status}`;
-    throw new Error(errMsg);
-  }
-
-  const b64 = data?.data?.[0]?.b64_json;
-  if (b64) return `data:image/png;base64,${b64}`;
-
-  const url = data?.data?.[0]?.url;
-  if (url) return url;
-
-  throw new Error('No image returned. ' + JSON.stringify(data).slice(0, 200));
 },
 
   async _loadAndRenderImage(card, prompt) {
