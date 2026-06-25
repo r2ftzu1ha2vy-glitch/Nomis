@@ -107,7 +107,7 @@ async function fetchWithKeyFallback(url, buildOptions) {
 const MODEL_DEFAULT       = 'google/gemini-flash-1.5';      // standard users
 const MODEL_CREATOR       = 'gryphe/mythomax-l2-13b';       // owner account
 const MODEL_IMAGE         = 'openai/gpt-image-1';
-const MODEL_IMAGE_CREATOR = 'google/gemini-3-pro-image-preview';  // same for now until you confirm credits cover it
+const MODEL_IMAGE_CREATOR = 'google/gemini-3-pro-image';  // same for now until you confirm credits cover it
 
 function getActiveModel() {
   if (state?.user?.email === OWNER_EMAIL) return MODEL_CREATOR;
