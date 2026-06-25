@@ -2375,7 +2375,6 @@ async function sendMessage() {
 
   try {
     const { systemPrompt, assistantIntro } = buildSystemMessages();
-     const fullContent = await streamCompletion({ messages, targetBubble: bubbleEl, hasImage: !!capturedImage });
     const historyMessages = state.messages.slice(0, -1).map(m => ({
       role: m.role,
       content: typeof m.content === 'string' ? m.content.replace('\n[Image attached]', '[image was attached to this message]') : m.content
@@ -2388,12 +2387,20 @@ async function sendMessage() {
       { role: 'user', content: currentUserContent }
     ];
 
+    if (capturedImage) {
+      const isCreator = state?.user?.email === OWNER_EMAIL;
+      showToast(isCreator
+        ? '✦ Switching to Gemini 2.5 Pro for image analysis'
+        : '✦ Switching to Gemini 2.5 Flash for image analysis'
+      );
+    }
+
     thinkingRow.remove();
     const assistantRow = createMessageRow('assistant', '');
     const bubbleEl = assistantRow.querySelector('.msg-bubble');
     messagesList.appendChild(assistantRow); scrollToBottom();
 
-    const fullContent = await streamCompletion({ messages, targetBubble: bubbleEl });
+    const fullContent = await streamCompletion({ messages, targetBubble: bubbleEl, hasImage: !!capturedImage });
     const asstMsgIndex = state.messages.length;
     state.messages.push({ role: 'assistant', content: fullContent });
     wireAssistantActions(assistantRow, fullContent, asstMsgIndex);
