@@ -49,12 +49,10 @@ function isOutOfCreditsError(status, errorMessage = '') {
   const msg = errorMessage.toLowerCase();
   return (
     status === 402 ||
-    msg.includes('credits') ||
-    msg.includes('afford') ||
-    msg.includes('insufficient') ||
+    msg.includes('insufficient credits') ||
+    msg.includes('out of credits') ||
+    msg.includes('no credits') ||
     msg.includes('billing') ||
-    msg.includes('quota') ||
-    msg.includes('limit exceeded') ||
     msg.includes('rate limit') ||
     msg.includes('429')
   );
@@ -974,36 +972,38 @@ const ImageGen = {
    * Automatically rotates through the key pool on credit errors.
    */
 async _generateViaAPI(prompt) {
-  const response = await fetchWithKeyFallback(
-    'https://openrouter.ai/api/v1/images',
-    (key) => ({
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${key}`,
-        'HTTP-Referer': APP_URL,
-        'X-Title': 'Nomis AI',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: getActiveImageModel(),
-        prompt: `Photorealistic, highly detailed, visually stunning. Professional photography or digital art quality. Perfect lighting, composition, textures, and fine details. Subject: ${prompt}`,
-        quality: 'high',
-        output_format: 'png',
-      }),
-    })
-  );
+  const key = getActiveKey(); // use key directly, bypass fallback for images
+  const response = await fetch('https://openrouter.ai/api/v1/images', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${key}`,
+      'HTTP-Referer': APP_URL,
+      'X-Title': 'Nomis AI',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: getActiveImageModel(),
+      prompt: `Photorealistic, highly detailed, visually stunning. Professional photography or digital art quality. Perfect lighting, composition, textures, and fine details. Subject: ${prompt}`,
+      quality: 'high',
+      output_format: 'png',
+    }),
+  });
 
   const data = await response.json();
+  console.log('[ImageGen] status:', response.status, 'body:', JSON.stringify(data).slice(0, 400));
 
-  // Official response format: { data: [{ b64_json: "..." }] }
+  if (!response.ok) {
+    const errMsg = data?.error?.message || data?.message || `HTTP ${response.status}`;
+    throw new Error(errMsg);
+  }
+
   const b64 = data?.data?.[0]?.b64_json;
   if (b64) return `data:image/png;base64,${b64}`;
 
-  // Some models return a URL instead
   const url = data?.data?.[0]?.url;
   if (url) return url;
 
-  throw new Error('No image returned. ' + (data?.error?.message || ''));
+  throw new Error('No image returned. ' + JSON.stringify(data).slice(0, 200));
 },
 
   async _loadAndRenderImage(card, prompt) {
