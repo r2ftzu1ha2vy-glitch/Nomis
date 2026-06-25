@@ -106,8 +106,8 @@ async function fetchWithKeyFallback(url, buildOptions) {
 /* ── Dynamic model selection ── */
 const MODEL_DEFAULT       = 'google/gemini-flash-1.5';      // standard users
 const MODEL_CREATOR       = 'gryphe/mythomax-l2-13b';       // owner account
-const MODEL_IMAGE         = 'google/gemini-2.5-flash-preview:image';  // standard users — fast, great quality
-const MODEL_IMAGE_CREATOR = 'google/gemini-3-pro:image';              // creator — best available
+const MODEL_IMAGE         = 'google/gemini-2.5-flash-preview-05-20:image';
+const MODEL_IMAGE_CREATOR = 'google/gemini-2.5-pro-preview:image';         // creator — best available
 
 function getActiveModel() {
   if (state?.user?.email === OWNER_EMAIL) return MODEL_CREATOR;
@@ -940,69 +940,41 @@ const ImageGen = {
    * Returns a base64 data URL of the generated image.
    * Automatically rotates through the key pool on credit errors.
    */
-  async _generateViaAPI(prompt) {
-    const response = await fetchWithKeyFallback(
-      'https://openrouter.ai/api/v1/chat/completions',
-      (key) => ({
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${key}`,
-          'HTTP-Referer': APP_URL,
-          'X-Title': 'Nomis AI',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-  model: getActiveImageModel(),
-          messages: [
-            {
-              role: 'user',
-              content: [
-                {
-                  type: 'text',
-                  text: `Generate a photorealistic, highly detailed, visually stunning image. Make it look as if it were taken by a professional photographer or created by a professional digital artist. Pay close attention to lighting, composition, textures, and fine details. Image subject: ${prompt}`,
-                },
-              ],
-            },
-          ],
-          max_tokens: 2048,
-        }),
-      })
-    );
+async _generateViaAPI(prompt) {
+  const imageModel = getActiveImageModel();
+  
+  // Try the dedicated images endpoint first (required for Gemini/Nano Banana models)
+  const response = await fetchWithKeyFallback(
+    'https://openrouter.ai/api/v1/images/generations',
+    (key) => ({
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${key}`,
+        'HTTP-Referer': APP_URL,
+        'X-Title': 'Nomis AI',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: imageModel,
+        prompt: `Photorealistic, highly detailed, visually stunning. Professional photography or digital art quality. Perfect lighting, composition, textures, and fine details. Subject: ${prompt}`,
+        n: 1,
+        size: '1024x1024',
+      }),
+    })
+  );
 
-    const data = await response.json();
-    const content = data.choices?.[0]?.message?.content;
+  const data = await response.json();
 
-    if (!content) throw new Error('No image content returned from API.');
+  // Standard images/generations response format
+  const imageData = data?.data?.[0];
+  if (!imageData) throw new Error('No image data returned from API.');
 
-    // Handle content that may be an array of blocks or a plain string
-    if (Array.isArray(content)) {
-      for (const block of content) {
-        if (block.type === 'image_url') {
-          return block.image_url?.url || null;
-        }
-        // Some models return base64 directly
-        if (block.type === 'image' && block.source?.data) {
-          return `data:${block.source.media_type || 'image/png'};base64,${block.source.data}`;
-        }
-      }
-      // If no image block found, check for a text block with a URL
-      const textBlock = content.find(b => b.type === 'text');
-      if (textBlock?.text) {
-        const urlMatch = textBlock.text.match(/https?:\/\/\S+\.(png|jpg|jpeg|webp|gif)/i);
-        if (urlMatch) return urlMatch[0];
-      }
-    }
+  // Could be a URL or base64
+  if (imageData.url) return imageData.url;
+  if (imageData.b64_json) return `data:image/png;base64,${imageData.b64_json}`;
 
-    if (typeof content === 'string') {
-      // Could be a URL or base64 embedded in text
-      const urlMatch = content.match(/https?:\/\/\S+/);
-      if (urlMatch) return urlMatch[0];
-      // Base64 data URL
-      if (content.startsWith('data:image')) return content;
-    }
-
-    throw new Error('Could not extract image from API response.');
-  },
+  throw new Error('Could not extract image from API response.');
+},
 
   async _loadAndRenderImage(card, prompt) {
     const loader = this._makeLoader();
