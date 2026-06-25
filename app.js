@@ -110,9 +110,9 @@ const MODEL_IMAGE_CREATOR = 'google/gemini-3-pro-image';  // same for now until 
 
 function getActiveModel(hasImage = false) {
   if (state?.user?.email === OWNER_EMAIL) {
-    return hasImage ? 'google/gemini-2.5-pro-preview' : 'gryphe/mythomax-l2-13b';
+    return hasImage ? 'google/gemini-2.5-pro' : 'gryphe/mythomax-l2-13b';
   }
-  return hasImage ? 'google/gemini-2.5-flash-preview' : 'google/gemini-flash-1.5';
+  return hasImage ? 'google/gemini-2.5-flash' : 'google/gemini-flash-1.5';
 }
 
 const APP_URL = window.location.href;
