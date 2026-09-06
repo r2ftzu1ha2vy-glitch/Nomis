@@ -108,18 +108,6 @@ const MODEL_CREATOR       = 'gryphe/mythomax-l2-13b';       // owner account
 const MODEL_IMAGE         = 'openai/gpt-image-1';
 const MODEL_IMAGE_CREATOR = 'google/gemini-3-pro-image';  // same for now until you confirm credits cover it
 
-if (capturedImage) {
-  const isCreator = state?.user?.email === OWNER_EMAIL;
-  showToast(isCreator
-    ? '✦ Switching to Gemini 2.5 Pro for image analysis'
-    : '✦ Switching to Gemini 2.5 Flash for image analysis'
-  );
-  state.imageModeActive = true;
-} else if (state.imageModeActive) {
-  showToast('✦ Back to standard model');
-  state.imageModeActive = false;
-}
-
 const APP_URL = window.location.href;
 
 /* ── Firebase ── */
