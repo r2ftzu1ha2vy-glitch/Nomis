@@ -10,8 +10,8 @@
 
 /* ── Multi-Key Pool with Auto-Fallback ── */
 const OPENROUTER_API_KEYS = [
-   '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',
-  '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',
+   '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',
+   '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',
    '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',
   // Add more keys here as needed:
   // 'sk-or-v1-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
