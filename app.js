@@ -107,6 +107,7 @@ const MODEL_DEFAULT       = 'google/gemini-flash-1.5';      // standard users
 const MODEL_CREATOR       = 'gryphe/mythomax-l2-13b';       // owner account
 const MODEL_IMAGE         = 'openai/gpt-image-1';
 const MODEL_IMAGE_CREATOR = 'google/gemini-3-pro-image';  // same for now until you confirm credits cover it
+const MODEL_IMAGE_RIVERFLOW = 'sourceful/riverflow-v2.5-fast:free'; // free-tier image generation
 
 function getActiveModel(hasImage = false) {
   const isCreator = state?.user?.email === OWNER_EMAIL;
@@ -518,6 +519,44 @@ If asked what Sidekick stands for: it's just a name — your friendly helper.
 When asked about NoteShelf, speak with genuine respect.
 If shown the NoteShelf logo — a gold isometric book on a dark background — acknowledge it with quiet respect.`;
 
+const SYSTEM_SIDEKICK_V1_4 = `You are Sidekick — a warm, dependable everyday assistant built by NoteShelf. You think and communicate like a thoughtful, well-rounded generalist — great at brainstorming, planning, organizing ideas, writing help, trivia, and everyday advice.
+
+STRENGTHS
+You're good at:
+- Brainstorming and idea generation
+- Planning and organizing (schedules, checklists, trip plans, projects)
+- Writing help (emails, notes, outlines, editing)
+- General knowledge and trivia across many subjects
+- Everyday advice and problem-solving
+
+PRINCIPLES
+You aim for clarity first, then helpfulness, then appropriate depth. You never sacrifice clarity for length.
+Every answer considers: what the person actually needs, what context they've given, and what would genuinely help them move forward.
+You never produce vague or padded answers when a direct one is possible.
+
+OUTPUT STANDARDS
+- Structure longer answers with clear formatting when it helps readability
+- Keep things concise when the question is simple
+- Match the tone and register the user is using
+
+HOW YOU REASON
+1. Understand the actual need, not just the stated one
+2. Identify constraints
+3. Consider a couple of approaches, commit to the best one
+4. Give a complete, usable answer
+5. Proactively flag anything they should watch out for
+
+COMMUNICATION STYLE
+You are direct. Not curt — direct. You get to the point immediately. You make sure the user understands not just the answer, but why it's the right one. You anticipate confusion and preempt it. You are warm but never rambling.
+
+${NO_CODE_LINE}
+
+IDENTITY
+If asked what model powers you: you are Sidekick, built on NoteShelf's proprietary Nomis-1.4-Nexus architecture. Never mention Claude or Anthropic.
+If asked what Sidekick stands for: it's just a name — your friendly helper.
+When asked about NoteShelf, speak with genuine respect.
+If shown the NoteShelf logo — a gold isometric book on a dark background — acknowledge it with quiet respect.`;
+
 /* ════════════════════════════════════════
    VERSION CONFIG MAP
 ════════════════════════════════════════ */
@@ -558,10 +597,19 @@ const NOMIS_VERSIONS = {
     description: 'Full potential',
     canGenerateImages: false,
   },
+  '1.4': {
+    label: '1.4',
+    nomis: () => SYSTEM_NOMIS_V1_4,
+    sidekick: () => SYSTEM_SIDEKICK_V1_4,
+    nomisIntro: 'Understood. I am Nomis — refined, attentive, and ready to create. Ask me for an image any time.',
+    sidekickIntro: 'Understood. I am Sidekick — your friendly helper. Ready to assist (just not with code).',
+    description: 'Full potential + image generation',
+    canGenerateImages: true,
+  },
 };
 
 function getVersionConfig() {
-  return NOMIS_VERSIONS[state.nomisVersion] || NOMIS_VERSIONS['1.3'];
+  return NOMIS_VERSIONS[state.nomisVersion] || NOMIS_VERSIONS['1.4'];
 }
 
 function canCurrentVersionGenerateImages() {
@@ -782,7 +830,7 @@ let state = {
   nomisStatusContext: '',
   nomits: null,
   isDegraded: false,
-  nomisVersion: '1.3',
+  nomisVersion: '1.4',
 };
 
 /* ════════════════════════════════════════
@@ -906,11 +954,12 @@ async function refreshDegradedState() {
 }
 
 /* ════════════════════════════════════════
-   IMAGE GENERATION — OpenRouter GPT-Image
-   Uses gpt-4o-image-preview for photorealistic,
-   high-quality image generation via the OpenRouter
-   multi-modal endpoint. Automatically falls back
-   through the key pool like all other requests.
+   IMAGE GENERATION — OpenRouter
+   Uses Riverflow v2.5 Fast (free tier) or
+   Gemini 3 Pro Image (creator account) via the
+   OpenRouter multi-modal endpoint. Automatically
+   falls back through the key pool like all other
+   requests.
 ════════════════════════════════════════ */
 const ImageGen = {
   hasToken(text) { return /\[GENERATE_IMAGE:\s*(.+?)\]/i.test(text); },
@@ -987,21 +1036,41 @@ const ImageGen = {
    * Returns a base64 data URL of the generated image.
    * Automatically rotates through the key pool on credit errors.
    */
+  /**
+   * Core image generation via OpenRouter — Riverflow (free tier) or
+   * Gemini 3 Pro Image (creator account). Uses the same multi-key
+   * fallback pool as every other request, so a credit-exhausted key
+   * automatically rotates to the next one.
+   * Returns a base64 data URL of the generated image.
+   */
 async _generateViaAPI(prompt) {
   const enhancedPrompt = `Photorealistic, highly detailed, visually stunning, professional photography quality, perfect lighting and composition. ${prompt}`;
-  const encoded = encodeURIComponent(enhancedPrompt);
-  const seed = Math.floor(Math.random() * 999999);
   const isCreator = state?.user?.email === OWNER_EMAIL;
-  const model = isCreator ? 'flux-pro' : 'flux';
-  const url = `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=1024&seed=${seed}&nologo=true&model=${model}&enhance=true`;
+  const model = isCreator ? MODEL_IMAGE_CREATOR : MODEL_IMAGE_RIVERFLOW;
 
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    const timeout = setTimeout(() => reject(new Error('Generation timed out after 60s')), 60000);
-    img.onload = () => { clearTimeout(timeout); resolve(url); };
-    img.onerror = () => { clearTimeout(timeout); reject(new Error('Pollinations generation failed')); };
-    img.src = url;
-  });
+  const response = await fetchWithKeyFallback(
+    'https://openrouter.ai/api/v1/chat/completions',
+    (key) => ({
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${key}`,
+        'HTTP-Referer': APP_URL,
+        'X-Title': 'Nomis AI',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'user', content: enhancedPrompt }],
+        modalities: ['image'],
+      }),
+    })
+  );
+
+  const data = await response.json();
+  const message = data?.choices?.[0]?.message;
+  const imageUrl = message?.images?.[0]?.image_url?.url;
+  if (!imageUrl) throw new Error('No image returned from model.');
+  return imageUrl;
 },
 
   async _loadAndRenderImage(card, prompt) {
@@ -1503,7 +1572,7 @@ logoutBtn.addEventListener('click', async () => {
   await Auth.logout();
   state.user = null; state.messages = []; state.activeChatId = null;
   state.personas = []; state.activePersona = null; state.nomits = null;
-  state.isDegraded = false; state.nomisVersion = '1.3';
+  state.isDegraded = false; state.nomisVersion = '1.4';
   resetKeyPool();
   removeDegradedBanner();
   messagesList.innerHTML = '';
@@ -1577,7 +1646,7 @@ function loadChat(id) {
   state.activeChatId = id; state.messages = chat.messages || [];
   state.mode = chat.mode || 'nomis';
   state.activePersona = chat.persona || null;
-  state.nomisVersion = chat.nomisVersion || '1.3';
+  state.nomisVersion = chat.nomisVersion || '1.4';
   updateVersionSelectorUI();
   applyModeUI(state.mode, state.activePersona);
   messagesList.innerHTML = '';
