@@ -1052,32 +1052,21 @@ const ImageGen = {
    */
 async _generateViaAPI(prompt) {
   const enhancedPrompt = `Photorealistic, highly detailed, visually stunning, professional photography quality, perfect lighting and composition. ${prompt}`;
-  const isCreator = state?.user?.email === OWNER_EMAIL;
-  const model = isCreator ? MODEL_IMAGE_CREATOR : MODEL_IMAGE_RIVERFLOW;
+  const encoded = encodeURIComponent(enhancedPrompt);
+  const seed = Math.floor(Math.random() * 1000000);
+  const url = `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=1024&seed=${seed}&nologo=true&model=flux`;
 
-  const response = await fetchWithKeyFallback(
-    'https://openrouter.ai/api/v1/chat/completions',
-    (key) => ({
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${key}`,
-        'HTTP-Referer': APP_URL,
-        'X-Title': 'Nomis AI',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: 'user', content: enhancedPrompt }],
-        modalities: ['image'],
-      }),
-    })
-  );
+  // Pollinations serves the image directly at this URL — verify it loads
+  // before handing it back, since a bad prompt can return an error page.
+  await new Promise((resolve, reject) => {
+    const testImg = new Image();
+    testImg.onload = resolve;
+    testImg.onerror = () => reject(new Error('Image generation failed. Please try again.'));
+    testImg.src = url;
+    setTimeout(() => reject(new Error('Image generation timed out.')), 30000);
+  });
 
-  const data = await response.json();
-  const message = data?.choices?.[0]?.message;
-  const imageUrl = message?.images?.[0]?.image_url?.url;
-  if (!imageUrl) throw new Error('No image returned from model.');
-  return imageUrl;
+  return url;
 },
 
   async _loadAndRenderImage(card, prompt) {
