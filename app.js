@@ -44,17 +44,24 @@ function resetKeyPool() {
   _activeKeyIndex = 0;
 }
 
-/** Returns true if the error/response indicates the key is out of credits */
+/** Returns true if the error/response indicates the key is bad and we should try the next one */
 function isOutOfCreditsError(status, errorMessage = '') {
   const msg = errorMessage.toLowerCase();
   return (
     status === 402 ||
+    status === 401 ||
+    status === 403 ||
     msg.includes('insufficient credits') ||
     msg.includes('out of credits') ||
     msg.includes('no credits') ||
     msg.includes('billing') ||
     msg.includes('rate limit') ||
-    msg.includes('429')
+    msg.includes('429') ||
+    msg.includes('user not found') ||
+    msg.includes('invalid api key') ||
+    msg.includes('unauthorized') ||
+    msg.includes('key expired') ||
+    msg.includes('not found')
   );
 }
 
