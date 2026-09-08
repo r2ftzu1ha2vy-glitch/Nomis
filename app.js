@@ -1066,36 +1066,60 @@ const ImageGen = {
     if (!$('imagegen-spin-style')) {
       const style = document.createElement('style');
       style.id = 'imagegen-spin-style';
-      style.textContent = `@keyframes spin{to{transform:rotate(360deg)}}`;
+      style.textContent = `
+        @keyframes imggenShimmer{0%{background-position:-400px 0;}100%{background-position:400px 0;}}
+        @keyframes imggenPulse{0%,100%{opacity:0.35;}50%{opacity:0.85;}}
+        @keyframes imggenDrift{0%{transform:translate(-6%,-4%) scale(1.08);}50%{transform:translate(6%,4%) scale(1.15);}100%{transform:translate(-6%,-4%) scale(1.08);}}
+        @keyframes imggenBarGrow{to{width:var(--imggen-target,70%);}}
+        @keyframes imggenSparkle{0%,100%{opacity:0;transform:scale(0.6);}50%{opacity:1;transform:scale(1);}}
+      `;
       document.head.appendChild(style);
     }
     const loader = document.createElement('div');
     loader.className = 'imagegen-loader';
-    loader.style.cssText = `display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:36px 24px;font-family:'Cinzel',serif;font-size:10px;letter-spacing:1.5px;color:var(--gold-dim);text-align:center;`;
+    loader.style.cssText = `display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:0;font-family:'Cinzel',serif;text-align:center;`;
     loader.innerHTML = `
-      <div style="width:26px;height:26px;border:2px solid rgba(184,150,12,0.15);border-top-color:var(--gold);border-radius:50%;animation:spin 0.8s linear infinite;"></div>
-      <span class="imagegen-status">Generating image…</span>
-      <span class="imagegen-timer" style="opacity:0.45;font-size:9px;">0s</span>`;
+      <div style="position:relative;width:100%;aspect-ratio:1/1;max-height:420px;border-radius:12px;overflow:hidden;background:linear-gradient(120deg,rgba(184,150,12,0.05) 8%,rgba(184,150,12,0.16) 18%,rgba(184,150,12,0.05) 33%);background-size:800px 100%;animation:imggenShimmer 2.2s ease-in-out infinite;border:1px solid rgba(184,150,12,0.2);">
+        <div style="position:absolute;inset:-20%;background:radial-gradient(circle at 30% 30%,rgba(184,150,12,0.22),transparent 55%),radial-gradient(circle at 70% 65%,rgba(184,150,12,0.15),transparent 50%);animation:imggenDrift 5s ease-in-out infinite;"></div>
+        <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="var(--gold)" stroke-width="1.4" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);opacity:0.55;animation:imggenPulse 1.8s ease-in-out infinite;">
+          <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/>
+        </svg>
+        <span style="position:absolute;top:22%;left:65%;width:6px;height:6px;border-radius:50%;background:var(--gold);animation:imggenSparkle 2.4s ease-in-out infinite;animation-delay:0.3s;"></span>
+        <span style="position:absolute;top:68%;left:28%;width:4px;height:4px;border-radius:50%;background:var(--gold);animation:imggenSparkle 2.4s ease-in-out infinite;animation-delay:1.1s;"></span>
+        <span style="position:absolute;top:40%;left:20%;width:5px;height:5px;border-radius:50%;background:var(--gold);animation:imggenSparkle 2.4s ease-in-out infinite;animation-delay:1.8s;"></span>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center;gap:6px;width:100%;">
+        <span class="imagegen-status" style="font-size:10px;letter-spacing:1.5px;color:var(--gold-dim);">Generating image…</span>
+        <div style="width:min(220px,80%);height:3px;border-radius:3px;background:rgba(184,150,12,0.12);overflow:hidden;">
+          <div class="imagegen-bar" style="height:100%;width:6%;border-radius:3px;background:linear-gradient(90deg,var(--gold-dim),var(--gold));transition:width 1.1s ease;"></div>
+        </div>
+        <span class="imagegen-timer" style="opacity:0.4;font-size:9px;letter-spacing:1px;">0s</span>
+      </div>`;
     return loader;
   },
 
   _startTimer(loader) {
     const timerEl = loader.querySelector('.imagegen-timer');
     const statusEl = loader.querySelector('.imagegen-status');
+    const barEl = loader.querySelector('.imagegen-bar');
     const start = Date.now();
     const messages = [
-      [0,  'Generating image…'],
-      [5,  'Painting the details…'],
-      [12, 'Adding finishing touches…'],
-      [20, 'Rendering textures…'],
-      [35, 'Almost ready…'],
+      [0,  'Generating image…', 6],
+      [3,  'Sketching the composition…', 22],
+      [7,  'Painting the details…', 42],
+      [13, 'Adding finishing touches…', 62],
+      [20, 'Rendering textures…', 80],
+      [30, 'Almost ready…', 92],
     ];
     const interval = setInterval(() => {
       if (!loader.parentNode) { clearInterval(interval); return; }
       const elapsed = Math.floor((Date.now() - start) / 1000);
       if (timerEl) timerEl.textContent = elapsed + 's';
       const msg = messages.filter(([t]) => elapsed >= t).pop();
-      if (msg && statusEl && statusEl.textContent !== msg[1]) statusEl.textContent = msg[1];
+      if (msg) {
+        if (statusEl && statusEl.textContent !== msg[1]) statusEl.textContent = msg[1];
+        if (barEl) barEl.style.width = msg[2] + '%';
+      }
     }, 1000);
     return interval;
   },
