@@ -10,7 +10,14 @@
 
 /* ── Multi-Key Pool with Auto-Fallback — Rewind.ai ── */
 const REWIND_API_KEYS = [
-   
+   'sk-rewind-ec202c4ad1437181c1fd8b2ad85225ff',
+   'sk-rewind-237d9ad83be19e5f0ae6bcd7305cb9dd',
+   'sk-rewind-8349cce575860d2dafc5b63708b3dbf1',
+   'sk-rewind-8c064d477700c03a677eb04d6e60cf0c',
+   'sk-rewind-3494dab448f97a35e7c0b74300ce29b8',
+   'sk-rewind-ed5093af76ffd1d862a2c02b6808a558',
+   'sk-rewind-5c54acad66f5bec41b83edc97acad2cf',
+   'sk-rewind-c771603899d5484611471babe8bcb240',
   // Add more keys here as needed:
   // 'sk-rewind-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
   // 'sk-rewind-YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY',
@@ -51,7 +58,13 @@ function resetKeyPool() {
 /** Returns true if the error/response indicates the key is bad and we should try the next one */
 function isOutOfCreditsError(status, errorMessage = '') {
   const msg = errorMessage.toLowerCase();
-  if (status === 402 || status === 401 || status === 403 || status === 429) return true;
+  // 429 is intentionally excluded here. It means rate-limited, not dead,
+  // and is already handled by the dedicated backoff-retry branch above
+  // this call site. Including it here caused a single 429 to be retried
+  // by that branch AND THEN counted again as a dead key, triggering
+  // rotation and another retry — multiplying outbound requests (and
+  // tokens billed) per logical send.
+  if (status === 402 || status === 401 || status === 403) return true;
   return (
     msg.includes('insufficient tokens') ||
     msg.includes('insufficient credits') ||
@@ -1340,7 +1353,7 @@ ${text.slice(0, 3000)}
           messages: [{
             role: 'user',
             content: [
-              { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64}` } },
+              { type: 'image_url', imageUrl: { url: `data:${mimeType};base64,${base64}` } },
               { type: 'text', text: `You are an expert AI image detection system. Analyse this image for signs it was AI-generated vs photographed or hand-made by a human.
 
 Return ONLY a valid JSON object in this exact format, nothing else:
@@ -2401,7 +2414,7 @@ async function generateChatTitle(chatId, firstMessage) {
 function buildUserContent(text, imageData) {
   if (!imageData) return text || '';
   return [
-    { type: 'image_url', image_url: { url: `data:${imageData.mimeType};base64,${imageData.base64}` } },
+    { type: 'image_url', imageUrl: { url: `data:${imageData.mimeType};base64,${imageData.base64}` } },
     { type: 'text', text: text || 'Please describe and analyse this image in detail.' }
   ];
 }
