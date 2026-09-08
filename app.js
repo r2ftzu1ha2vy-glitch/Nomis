@@ -198,7 +198,7 @@ const VERSION_MODEL_MAP = {
   '1.1': 'deepseek/deepseek-r1',
   '1.2': 'anthropic/claude-sonnet-5',          // fallback: 'openai/gpt-4o'
   '1.3': 'anthropic/claude-sonnet-5',
-  '1.4': 'anthropic/claude-sonnet-5',
+  '1.4': 'openai/gpt-4o',
 };
 
 const MODEL_FALLBACK_1_2_TO_1_4 = 'openai/gpt-4o'; // used only if Claude Sonnet 5 slug 404s on Rewind
