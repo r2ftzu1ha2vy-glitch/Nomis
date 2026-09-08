@@ -10,7 +10,7 @@
 
 /* ── Separate Key Pools: Chat vs Image — Rewind.ai ── */
 const REWIND_API_KEYS = [
-   'sk-rewind-75b6831dbf7fb1b40c3a0f727f718fef',
+   'sk-rewind-237d9ad83be19e5f0ae6bcd7305cb9dd',
   // Add more keys here as needed:
   // 'sk-rewind-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
 ];
@@ -72,21 +72,14 @@ function resetKeyPool() {
 /** Returns true if the error/response indicates the key is bad and we should try the next one */
 function isOutOfCreditsError(status, errorMessage = '') {
   const msg = errorMessage.toLowerCase();
+  if (status === 402 || status === 401 || status === 403 || status === 429) return true;
   return (
-    status === 402 ||
-    status === 401 ||
-    status === 403 ||
-    msg.includes('insufficient') ||
+    msg.includes('insufficient tokens') ||
+    msg.includes('insufficient credits') ||
     msg.includes('out of tokens') ||
-    msg.includes('no tokens') ||
-    msg.includes('billing') ||
-    msg.includes('rate limit') ||
-    msg.includes('429') ||
-    msg.includes('user not found') ||
+    msg.includes('no tokens remaining') ||
     msg.includes('invalid api key') ||
-    msg.includes('unauthorized') ||
-    msg.includes('key expired') ||
-    msg.includes('not found')
+    msg.includes('key expired')
   );
 }
 
@@ -112,6 +105,25 @@ async function fetchWithKeyFallback(url, buildOptions, pool = REWIND_API_KEYS, g
 
     if (response.ok) {
       return response; // success
+    }
+
+    // 429 = rate-limited, not dead. Back off and retry the SAME key
+    // a couple times before treating it as exhausted.
+    if (response.status === 429) {
+      let rateLimitRetries = 0;
+      while (rateLimitRetries < 2) {
+        rateLimitRetries++;
+        const waitMs = 1000 * rateLimitRetries;
+        console.warn(`[KeyPool] 429 rate-limited. Waiting ${waitMs}ms before retry ${rateLimitRetries}/2…`);
+        await new Promise(r => setTimeout(r, waitMs));
+        try {
+          response = await fetch(url, options);
+        } catch (networkErr) {
+          throw networkErr;
+        }
+        if (response.ok) return response;
+        if (response.status !== 429) break; // different error now, fall through to normal handling
+      }
     }
 
     // Try to parse error body
@@ -2410,7 +2422,7 @@ async function streamCompletion({ messages, targetBubble, hasImage = false, onDo
   for (let attempt = 0; attempt < REWIND_API_KEYS.length; attempt++) {
     const key = getActiveKey();
     try {
-      const r = await fetch(REWIND_BASE_URL, {
+      let r = await fetch(REWIND_BASE_URL, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${key}`,
@@ -2422,6 +2434,23 @@ async function streamCompletion({ messages, targetBubble, hasImage = false, onDo
       if (r.ok) {
         response = r;
         break;
+      }
+
+      // 429 = rate-limited, not dead. Back off and retry the SAME key first.
+      if (r.status === 429) {
+        for (let rl = 1; rl <= 2; rl++) {
+          const waitMs = 1000 * rl;
+          console.warn(`[KeyPool/Stream] 429 rate-limited. Waiting ${waitMs}ms before retry ${rl}/2…`);
+          await new Promise(res => setTimeout(res, waitMs));
+          r = await fetch(REWIND_BASE_URL, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model, messages, stream: true, max_tokens: maxTokens, temperature }),
+          });
+          if (r.ok) { response = r; break; }
+          if (r.status !== 429) break;
+        }
+        if (response) break;
       }
 
       let errData = {};
@@ -2646,12 +2675,30 @@ async function retryLastMessage(row, bubble) {
     let response = null;
     for (let attempt = 0; attempt < REWIND_API_KEYS.length; attempt++) {
       const key = getActiveKey();
-      const r = await fetch(REWIND_BASE_URL, {
+      const buildBody = () => JSON.stringify({ model, messages, stream: true, max_tokens: state.isDegraded ? 300 : 1024, temperature: state.isDegraded ? 0.6 : (state.mode === 'sidekick' ? 0.5 : 1.0) });
+      let r = await fetch(REWIND_BASE_URL, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, messages, stream: true, max_tokens: state.isDegraded ? 300 : 1024, temperature: state.isDegraded ? 0.6 : (state.mode === 'sidekick' ? 0.5 : 1.0) })
+        body: buildBody()
       });
       if (r.ok) { response = r; break; }
+
+      // 429 = rate-limited, not dead. Back off and retry the SAME key first.
+      if (r.status === 429) {
+        for (let rl = 1; rl <= 2; rl++) {
+          const waitMs = 1000 * rl;
+          await new Promise(res => setTimeout(res, waitMs));
+          r = await fetch(REWIND_BASE_URL, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+            body: buildBody()
+          });
+          if (r.ok) { response = r; break; }
+          if (r.status !== 429) break;
+        }
+        if (response) break;
+      }
+
       let errData = {};
       try { errData = await r.clone().json(); } catch {}
       const errMsg = errData?.error?.message || '';
