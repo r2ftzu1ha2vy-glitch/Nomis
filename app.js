@@ -65,13 +65,15 @@ function resetKeyPool() {
 
 /** Returns true if the error/response indicates the key is bad and we should try the next one */
 function isOutOfCreditsError(status, errorMessage = '') {
+  // 429 is categorically a rate limit, never a dead key, regardless of
+  // what the error body says. Rewind's 429 body sometimes contains
+  // wording like "insufficient tokens" that overlaps with its dead-key
+  // copy, so the text checks below used to match it and rotate anyway,
+  // defeating the same-key backoff retry and burning through the whole
+  // pool on a limit that isn't applied per-key. Stop it here first.
+  if (status === 429) return false;
+
   const msg = errorMessage.toLowerCase();
-  // 429 is intentionally excluded here. It means rate-limited, not dead,
-  // and is already handled by the dedicated backoff-retry branch above
-  // this call site. Including it here caused a single 429 to be retried
-  // by that branch AND THEN counted again as a dead key, triggering
-  // rotation and another retry — multiplying outbound requests (and
-  // tokens billed) per logical send.
   if (status === 402 || status === 401 || status === 403) return true;
   return (
     msg.includes('insufficient tokens') ||
@@ -113,9 +115,10 @@ async function fetchWithKeyFallback(url, buildOptions, pool = REWIND_API_KEYS, g
     }
 
     // 429 = rate-limited, not dead. Back off and retry the SAME key
-    // a couple times before treating it as exhausted.
+    // a couple times before giving up on this attempt entirely.
     if (response.status === 429) {
       let rateLimitRetries = 0;
+      let stillRateLimited = true;
       while (rateLimitRetries < 2) {
         rateLimitRetries++;
         const waitMs = 1000 * rateLimitRetries;
@@ -127,7 +130,14 @@ async function fetchWithKeyFallback(url, buildOptions, pool = REWIND_API_KEYS, g
           throw networkErr;
         }
         if (response.ok) return response;
-        if (response.status !== 429) break; // different error now, fall through to normal handling
+        if (response.status !== 429) { stillRateLimited = false; break; }
+      }
+      // Backoff exhausted and still 429 — this is not a dead key.
+      // Rotating would just spend the next key's request on a limit
+      // that likely applies above the per-key level. Stop here instead
+      // of continuing the attempt loop into rotation.
+      if (stillRateLimited) {
+        throw new Error('Rate limited by the API. Please wait a moment and try again.');
       }
     }
 
@@ -2468,6 +2478,7 @@ async function streamCompletion({ messages, targetBubble, hasImage = false, onDo
 
       // 429 = rate-limited, not dead. Back off and retry the SAME key first.
       if (r.status === 429) {
+        let stillRateLimited = true;
         for (let rl = 1; rl <= 2; rl++) {
           const waitMs = 1000 * rl;
           console.warn(`[KeyPool/Stream] 429 rate-limited. Waiting ${waitMs}ms before retry ${rl}/2…`);
@@ -2478,9 +2489,14 @@ async function streamCompletion({ messages, targetBubble, hasImage = false, onDo
             body: JSON.stringify({ model, messages, stream: true, max_tokens: maxTokens, temperature }),
           });
           if (r.ok) { response = r; break; }
-          if (r.status !== 429) break;
+          if (r.status !== 429) { stillRateLimited = false; break; }
         }
         if (response) break;
+        // Backoff exhausted and still 429 — not a dead key. Stop instead
+        // of letting this fall through into rotation across the pool.
+        if (stillRateLimited) {
+          throw new Error('Rate limited by the API. Please wait a moment and try again.');
+        }
       }
 
       let errData = {};
@@ -2496,6 +2512,7 @@ async function streamCompletion({ messages, targetBubble, hasImage = false, onDo
       throw new Error(errMsg || `API error ${r.status}`);
     } catch (networkErr) {
       if (networkErr.message.includes('API keys')) throw networkErr;
+      if (networkErr.message.includes('Rate limited')) throw networkErr;
       lastErr = networkErr;
       if (!rotateKey()) throw lastErr;
     }
@@ -2717,6 +2734,7 @@ async function retryLastMessage(row, bubble) {
 
       // 429 = rate-limited, not dead. Back off and retry the SAME key first.
       if (r.status === 429) {
+        let stillRateLimited = true;
         for (let rl = 1; rl <= 2; rl++) {
           const waitMs = 1000 * rl;
           await new Promise(res => setTimeout(res, waitMs));
@@ -2726,9 +2744,12 @@ async function retryLastMessage(row, bubble) {
             body: buildBody()
           });
           if (r.ok) { response = r; break; }
-          if (r.status !== 429) break;
+          if (r.status !== 429) { stillRateLimited = false; break; }
         }
         if (response) break;
+        if (stillRateLimited) {
+          throw new Error('Rate limited by the API. Please wait a moment and try again.');
+        }
       }
 
       let errData = {};
