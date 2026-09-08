@@ -190,8 +190,8 @@ const ImageLimit = {
    1.2–1.4 → Claude Sonnet 5 (fallback GPT-4o)
    Image gen → FLUX.2 Klein 4B (all versions)
 ════════════════════════════════════════ */
-const MODEL_IMAGE         = 'black-forest-labs/flux.2-klein-4b';
-const MODEL_IMAGE_CREATOR = 'black-forest-labs/flux.2-klein-4b';
+const MODEL_IMAGE         = 'openai/gpt-image-2';
+const MODEL_IMAGE_CREATOR = 'openai/gpt-image-2';
 
 const VERSION_MODEL_MAP = {
   '1.0': 'meta-llama/llama-3-70b-instruct',   // swap to 'qwen/qwen-3-72b-instruct' if preferred
