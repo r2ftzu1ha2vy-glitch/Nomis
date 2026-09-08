@@ -29,7 +29,15 @@ const REWIND_IMAGE_URL = 'https://api.rewind.ai/v1/images/generations';
 const DAILY_IMAGE_LIMIT = 3;
 const IMAGE_LIMIT_WINDOW_MS = 24 * 60 * 60 * 1000;
 
-/* Tracks which key index is currently active */
+/* Tracks which key index is currently active.
+   NOTE: This is intentionally reset to 0 at the start of every top-level
+   call site (see resetKeyPool() calls in fetchWithKeyFallback,
+   streamCompletion, and retryLastMessage). Previously this stayed sticky
+   across calls: once any key failed once, _activeKeyIndex advanced
+   permanently and every future request â€” across the whole session â€”
+   started on the next key instead of retrying the original one. That
+   silently drained keys further down the pool even when the earlier key
+   was fine, because nothing ever tried it again. */
 let _activeKeyIndex = 0;
 
 function getActiveKey() {
@@ -83,6 +91,11 @@ function isOutOfCreditsError(status, errorMessage = '') {
  * Returns response on success, throws on total failure.
  */
 async function fetchWithKeyFallback(url, buildOptions, pool = REWIND_API_KEYS, getKeyFn = getActiveKey, rotateFn = rotateKey) {
+  // Always start from the first key on a fresh call. Rotation within
+  // this call is fine and expected when a key genuinely fails, but it
+  // must not carry over and bias every future unrelated call.
+  if (pool === REWIND_API_KEYS) resetKeyPool();
+
   for (let attempt = 0; attempt < pool.length; attempt++) {
     const key = getKeyFn();
     const options = buildOptions(key);
@@ -2423,6 +2436,10 @@ function buildUserContent(text, imageData) {
    CORE API CALL — with multi-key fallback
 ════════════════════════════════════════ */
 async function streamCompletion({ messages, targetBubble, hasImage = false, onDone, onError }) {
+  // Same reasoning as fetchWithKeyFallback: don't inherit rotation state
+  // from a previous unrelated call. Start fresh from key 0 every time.
+  resetKeyPool();
+
   const model = getActiveModel(hasImage);
   const maxTokens = state.isDegraded ? 300 : 1024;
   const temperature = state.isDegraded ? 0.5 : (state.mode === 'sidekick' ? 0.2 : 0.8);
@@ -2676,6 +2693,8 @@ async function retryLastMessage(row, bubble) {
   bubble.innerHTML = ''; state.isStreaming = true; sendBtn.disabled = true;
   const barRamp = startStreamBar();
   const model = getActiveModel();
+  // Don't inherit rotation state from a previous call - start from key 0.
+  resetKeyPool();
 
   try {
     const { systemPrompt } = buildSystemMessages();
