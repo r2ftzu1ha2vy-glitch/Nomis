@@ -2,46 +2,71 @@
    Nomis AI — app.js
    Features: Personas, Shared Chats, Voice Input, Image Input,
              Message Editing, Text-to-Speech, Nomits Currency,
-             Image Generation (OpenRouter GPT-Image)
+             Image Generation (Rewind.ai FLUX.2 Klein)
    Daily 1000 Nomits + Degraded Mode after limit
-   Uses OpenRouter API — multi-key fallback system
+   Uses Rewind.ai API — multi-key fallback system
    Firebase Auth + Realtime Database
    ============================================================ */
 
-/* ── Multi-Key Pool with Auto-Fallback ── */
-const OPENROUTER_API_KEYS = [
-   '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',
-   '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',
-   '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',
+/* ── Separate Key Pools: Chat vs Image — Rewind.ai ── */
+const REWIND_API_KEYS = [
+   'sk-rewind-75b6831dbf7fb1b40c3a0f727f718fef',
   // Add more keys here as needed:
-  // 'sk-or-v1-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
-  // 'sk-or-v1-YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY',
+  // 'sk-rewind-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
 ];
 
-/* Tracks which key index is currently active */
+const REWIND_IMAGE_API_KEYS = [
+   'sk-rewind-ec202c4ad1437181c1fd8b2ad85225ff',
+  // Add more keys here as needed:
+  // 'sk-rewind-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
+];
+
+const REWIND_BASE_URL = 'https://api.rewind.ai/v1/chat/completions';
+const REWIND_IMAGE_URL = 'https://api.rewind.ai/v1/images/generations';
+
+const DAILY_IMAGE_LIMIT = 3;
+const IMAGE_LIMIT_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/* Tracks which key index is currently active, per pool */
 let _activeKeyIndex = 0;
+let _activeImageKeyIndex = 0;
 
 function getActiveKey() {
-  return OPENROUTER_API_KEYS[_activeKeyIndex % OPENROUTER_API_KEYS.length];
+  return REWIND_API_KEYS[_activeKeyIndex % REWIND_API_KEYS.length];
+}
+function getActiveImageKey() {
+  return REWIND_IMAGE_API_KEYS[_activeImageKeyIndex % REWIND_IMAGE_API_KEYS.length];
 }
 
 /**
- * Rotate to the next available key.
+ * Rotate to the next available key in a given pool.
  * Returns true if we successfully rotated, false if we've exhausted all keys.
  */
 function rotateKey() {
   const nextIndex = _activeKeyIndex + 1;
-  if (nextIndex >= OPENROUTER_API_KEYS.length) {
-    console.warn('[KeyPool] All API keys exhausted.');
+  if (nextIndex >= REWIND_API_KEYS.length) {
+    console.warn('[KeyPool] All chat API keys exhausted.');
     return false;
   }
   _activeKeyIndex = nextIndex;
-  console.info(`[KeyPool] Rotated to key index ${_activeKeyIndex}`);
+  console.info(`[KeyPool] Rotated to chat key index ${_activeKeyIndex}`);
+  return true;
+}
+
+function rotateImageKey() {
+  const nextIndex = _activeImageKeyIndex + 1;
+  if (nextIndex >= REWIND_IMAGE_API_KEYS.length) {
+    console.warn('[KeyPool] All image API keys exhausted.');
+    return false;
+  }
+  _activeImageKeyIndex = nextIndex;
+  console.info(`[KeyPool] Rotated to image key index ${_activeImageKeyIndex}`);
   return true;
 }
 
 function resetKeyPool() {
   _activeKeyIndex = 0;
+  _activeImageKeyIndex = 0;
 }
 
 /** Returns true if the error/response indicates the key is bad and we should try the next one */
@@ -51,9 +76,9 @@ function isOutOfCreditsError(status, errorMessage = '') {
     status === 402 ||
     status === 401 ||
     status === 403 ||
-    msg.includes('insufficient credits') ||
-    msg.includes('out of credits') ||
-    msg.includes('no credits') ||
+    msg.includes('insufficient') ||
+    msg.includes('out of tokens') ||
+    msg.includes('no tokens') ||
     msg.includes('billing') ||
     msg.includes('rate limit') ||
     msg.includes('429') ||
@@ -67,20 +92,21 @@ function isOutOfCreditsError(status, errorMessage = '') {
 
 /**
  * A wrapper around fetch that automatically retries with the next key
- * when an out-of-credits / rate-limit error is encountered.
- * Returns { response, data } on success, throws on total failure.
+ * when an out-of-tokens / rate-limit error is encountered.
+ * Pool-agnostic: pass which pool + getter/rotator to use so chat and
+ * image requests never share or exhaust each other's keys.
+ * Returns response on success, throws on total failure.
  */
-async function fetchWithKeyFallback(url, buildOptions) {
-  // Try every key in the pool
-  for (let attempt = 0; attempt < OPENROUTER_API_KEYS.length; attempt++) {
-    const key = getActiveKey();
+async function fetchWithKeyFallback(url, buildOptions, pool = REWIND_API_KEYS, getKeyFn = getActiveKey, rotateFn = rotateKey) {
+  for (let attempt = 0; attempt < pool.length; attempt++) {
+    const key = getKeyFn();
     const options = buildOptions(key);
 
     let response;
     try {
       response = await fetch(url, options);
     } catch (networkErr) {
-      // Network-level failure — not a credit issue, rethrow
+      // Network-level failure — not a token issue, rethrow
       throw networkErr;
     }
 
@@ -94,32 +120,101 @@ async function fetchWithKeyFallback(url, buildOptions) {
     const errMsg = errData?.error?.message || '';
 
     if (isOutOfCreditsError(response.status, errMsg)) {
-      console.warn(`[KeyPool] Key index ${_activeKeyIndex} is out of credits. Rotating…`);
-      if (!rotateKey()) {
-        throw new Error('All API keys are out of credits. Please add more credits or additional keys.');
+      console.warn(`[KeyPool] Key exhausted its tokens. Rotating…`);
+      if (!rotateFn()) {
+        throw new Error('All API keys are out of tokens. Please add more tokens or additional keys.');
       }
       // Continue loop with new key
       continue;
     }
 
-    // Non-credit error — surface it
+    // Non-token error — surface it
     throw new Error(errMsg || `API error ${response.status}`);
   }
 
-  throw new Error('All API keys failed. Please check your keys and credits.');
+  throw new Error('All API keys failed. Please check your keys and token balance.');
 }
 
-/* ── Dynamic model selection ── */
-const MODEL_DEFAULT       = 'google/gemini-flash-1.5';      // standard users
-const MODEL_CREATOR       = 'gryphe/mythomax-l2-13b';       // owner account
-const MODEL_IMAGE         = 'openai/gpt-image-1';
-const MODEL_IMAGE_CREATOR = 'google/gemini-3-pro-image';  // same for now until you confirm credits cover it
-const MODEL_IMAGE_RIVERFLOW = 'sourceful/riverflow-v2.5-fast:free'; // free-tier image generation
+/* ════════════════════════════════════════
+   DAILY IMAGE GENERATION LIMIT
+   3 images per user per rolling 24h window,
+   tracked in Firebase alongside Nomits.
+════════════════════════════════════════ */
+const ImageLimit = {
+  async _getState(uid) {
+    try {
+      const snap = await get(ref(db, `users/${uid}/imageLimit`));
+      if (!snap.exists()) return { count: 0, windowStart: 0 };
+      return snap.val();
+    } catch { return { count: 0, windowStart: 0 }; }
+  },
+
+  /** Returns { allowed, remaining, resetsAt (Date|null) } without consuming a slot. */
+  async check(uid) {
+    if (Nomits.isInfinite()) return { allowed: true, remaining: Infinity, resetsAt: null };
+    const now = Date.now();
+    const data = await this._getState(uid);
+    const windowExpired = !data.windowStart || (now - data.windowStart) >= IMAGE_LIMIT_WINDOW_MS;
+    if (windowExpired) return { allowed: true, remaining: DAILY_IMAGE_LIMIT, resetsAt: null };
+    const remaining = Math.max(0, DAILY_IMAGE_LIMIT - (data.count || 0));
+    const resetsAt = new Date(data.windowStart + IMAGE_LIMIT_WINDOW_MS);
+    return { allowed: remaining > 0, remaining, resetsAt };
+  },
+
+  /** Consumes one image-generation slot. Call only right before an actual API call. */
+  async consume(uid) {
+    if (Nomits.isInfinite()) return { allowed: true, remaining: Infinity, resetsAt: null };
+    const now = Date.now();
+    const data = await this._getState(uid);
+    const windowExpired = !data.windowStart || (now - data.windowStart) >= IMAGE_LIMIT_WINDOW_MS;
+
+    let count, windowStart;
+    if (windowExpired) { count = 1; windowStart = now; }
+    else { count = (data.count || 0) + 1; windowStart = data.windowStart; }
+
+    if (!windowExpired && count > DAILY_IMAGE_LIMIT) {
+      const resetsAt = new Date(windowStart + IMAGE_LIMIT_WINDOW_MS);
+      return { allowed: false, remaining: 0, resetsAt };
+    }
+
+    await set(ref(db, `users/${uid}/imageLimit`), { count, windowStart });
+    return { allowed: true, remaining: Math.max(0, DAILY_IMAGE_LIMIT - count), resetsAt: new Date(windowStart + IMAGE_LIMIT_WINDOW_MS) };
+  },
+
+  /** Formats a reset Date as "Wednesday, 4:32 PM". */
+  formatReset(date) {
+    if (!date) return 'soon';
+    const dayStr = date.toLocaleDateString('en-US', { weekday: 'long' });
+    const timeStr = date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    return `${dayStr}, ${timeStr}`;
+  }
+};
+
+/* ── Dynamic model selection — mapped to Nomis version, per spec ──
+   1.0 → Llama-3 / Qwen-3
+   1.1 → DeepSeek-R1
+   1.2–1.4 → Claude Sonnet 5 (fallback GPT-4o)
+   Image gen → FLUX.2 Klein 4B (all versions)
+════════════════════════════════════════ */
+const MODEL_IMAGE         = 'black-forest-labs/flux.2-klein-4b';
+const MODEL_IMAGE_CREATOR = 'black-forest-labs/flux.2-klein-4b';
+
+const VERSION_MODEL_MAP = {
+  '1.0': 'meta-llama/llama-3-70b-instruct',   // swap to 'qwen/qwen-3-72b-instruct' if preferred
+  '1.1': 'deepseek/deepseek-r1',
+  '1.2': 'anthropic/claude-sonnet-5',          // fallback: 'openai/gpt-4o'
+  '1.3': 'anthropic/claude-sonnet-5',
+  '1.4': 'anthropic/claude-sonnet-5',
+};
+
+const MODEL_FALLBACK_1_2_TO_1_4 = 'openai/gpt-4o'; // used only if Claude Sonnet 5 slug 404s on Rewind
 
 function getActiveModel(hasImage = false) {
-  const isCreator = state?.user?.email === OWNER_EMAIL;
-  if (hasImage) return isCreator ? MODEL_IMAGE_CREATOR : MODEL_IMAGE;
-  return isCreator ? MODEL_CREATOR : MODEL_DEFAULT;
+  if (hasImage) {
+    const isCreator = state?.user?.email === OWNER_EMAIL;
+    return isCreator ? MODEL_IMAGE_CREATOR : MODEL_IMAGE;
+  }
+  return VERSION_MODEL_MAP[state.nomisVersion] || VERSION_MODEL_MAP['1.4'];
 }
 
 const APP_URL = window.location.href;
@@ -961,12 +1056,10 @@ async function refreshDegradedState() {
 }
 
 /* ════════════════════════════════════════
-   IMAGE GENERATION — OpenRouter
-   Uses Riverflow v2.5 Fast (free tier) or
-   Gemini 3 Pro Image (creator account) via the
-   OpenRouter multi-modal endpoint. Automatically
-   falls back through the key pool like all other
-   requests.
+   IMAGE GENERATION — Rewind.ai
+   Uses FLUX.2 Klein 4B via the Rewind.ai images
+   endpoint. Automatically falls back through the
+   key pool like all other requests.
 ════════════════════════════════════════ */
 const ImageGen = {
   hasToken(text) { return /\[GENERATE_IMAGE:\s*(.+?)\]/i.test(text); },
@@ -1039,43 +1132,71 @@ const ImageGen = {
   },
 
   /**
-   * Core image generation via OpenRouter gpt-4o-image-preview.
-   * Returns a base64 data URL of the generated image.
-   * Automatically rotates through the key pool on credit errors.
+   * Core image generation via Rewind.ai — FLUX.2 Klein 4B.
+   * Uses the dedicated image key pool (separate from chat), so a
+   * token-exhausted image key rotates independently of chat keys.
+   * Returns a URL or base64 data URL of the generated image.
    */
-  /**
-   * Core image generation via OpenRouter — Riverflow (free tier) or
-   * Gemini 3 Pro Image (creator account). Uses the same multi-key
-   * fallback pool as every other request, so a credit-exhausted key
-   * automatically rotates to the next one.
-   * Returns a base64 data URL of the generated image.
-   */
-async _generateViaAPI(prompt) {
-  const enhancedPrompt = `Photorealistic, highly detailed, visually stunning, professional photography quality, perfect lighting and composition. ${prompt}`;
-  const encoded = encodeURIComponent(enhancedPrompt);
-  const seed = Math.floor(Math.random() * 1000000);
-  const url = `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=1024&seed=${seed}&nologo=true&model=flux`;
+  async _generateViaAPI(prompt) {
+    const enhancedPrompt = `Photorealistic, highly detailed, visually stunning, professional photography quality, perfect lighting and composition. ${prompt}`;
 
-  // Pollinations serves the image directly at this URL — verify it loads
-  // before handing it back, since a bad prompt can return an error page.
-  await new Promise((resolve, reject) => {
-    const testImg = new Image();
-    testImg.onload = resolve;
-    testImg.onerror = () => reject(new Error('Image generation failed. Please try again.'));
-    testImg.src = url;
-    setTimeout(() => reject(new Error('Image generation timed out.')), 30000);
-  });
+    const response = await fetchWithKeyFallback(
+      REWIND_IMAGE_URL,
+      (key) => ({
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${key}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: MODEL_IMAGE,
+          prompt: enhancedPrompt,
+          n: 1,
+          size: '1024x1024',
+        }),
+      }),
+      REWIND_IMAGE_API_KEYS,
+      getActiveImageKey,
+      rotateImageKey
+    );
 
-  return url;
-},
+    const data = await response.json();
+    const entry = data?.data?.[0];
+    if (!entry) throw new Error('No image returned.');
 
-  async _loadAndRenderImage(card, prompt) {
+    if (entry.b64_json) return `data:image/png;base64,${entry.b64_json}`;
+    if (entry.url) return entry.url;
+    throw new Error('No image URL returned.');
+  },
+
+  _makeLimitCard(resetsAt) {
+    const card = this._makeCard();
+    const when = ImageLimit.formatReset(resetsAt);
+    card.innerHTML = `
+      <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:28px 20px;text-align:center;">
+        <span style="font-family:'Cinzel',serif;font-size:11px;letter-spacing:1.5px;color:rgba(255,170,77,0.9);">✦ Daily image limit reached</span>
+        <span style="font-family:'EB Garamond',serif;font-size:14px;color:rgba(245,240,220,0.6);">You've used all ${DAILY_IMAGE_LIMIT} images for today.</span>
+        <span style="font-family:'EB Garamond',serif;font-size:14px;color:var(--gold);">Resets ${escHtml(when)}</span>
+      </div>`;
+    return card;
+  },
+
+  async _loadAndRenderImage(card, prompt, uid) {
     const loader = this._makeLoader();
     card.innerHTML = '';
     card.appendChild(loader);
     const timerInterval = this._startTimer(loader);
 
     try {
+      const limitResult = await ImageLimit.consume(uid);
+      if (!limitResult.allowed) {
+        clearInterval(timerInterval);
+        const limitCard = this._makeLimitCard(limitResult.resetsAt);
+        card.replaceWith(limitCard);
+        scrollToBottom();
+        return;
+      }
+
       const imageUrl = await this._generateViaAPI(prompt);
       clearInterval(timerInterval);
 
@@ -1101,8 +1222,9 @@ async _generateViaAPI(prompt) {
 
       card.appendChild(img);
 
-      const meta = this._makeMeta(prompt, async () => {
-        await this._loadAndRenderImage(card, prompt);
+      const remaining = limitResult.remaining === Infinity ? '∞' : limitResult.remaining;
+      const meta = this._makeMeta(`${prompt}  ·  ${remaining} left today`, async () => {
+        await this._loadAndRenderImage(card, prompt, uid);
         scrollToBottom();
       });
 
@@ -1124,13 +1246,13 @@ async _generateViaAPI(prompt) {
       loader.innerHTML = `
         <span style="color:rgba(255,107,107,0.75);font-family:'Cinzel',serif;font-size:10px;letter-spacing:1px;padding:0 16px;text-align:center;">
           Image generation failed: ${escHtml(err.message || 'Unknown error')}<br>
-          <small style="opacity:0.6;font-size:9px;">Check that the image model is available on your OpenRouter plan.</small>
+          <small style="opacity:0.6;font-size:9px;">Check that the image model is available on your Rewind.ai plan.</small>
         </span>
         <button class="action-btn" style="font-size:9px;letter-spacing:1px;margin-top:8px;" id="imggen-retry-btn">
           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.5"/></svg> Try again
         </button>`;
       loader.querySelector('#imggen-retry-btn')?.addEventListener('click', async () => {
-        await this._loadAndRenderImage(card, prompt);
+        await this._loadAndRenderImage(card, prompt, uid);
         scrollToBottom();
       });
     }
@@ -1142,7 +1264,7 @@ async _generateViaAPI(prompt) {
     const card = this._makeCard();
     bubble.appendChild(card);
     scrollToBottom();
-    await this._loadAndRenderImage(card, prompt);
+    await this._loadAndRenderImage(card, prompt, state.user?.uid);
   }
 };
 
@@ -1152,13 +1274,11 @@ async _generateViaAPI(prompt) {
 const AIDetector = {
   async analyzeText(text) {
     const response = await fetchWithKeyFallback(
-      'https://openrouter.ai/api/v1/chat/completions',
+      REWIND_BASE_URL,
       (key) => ({
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${key}`,
-          'HTTP-Referer': APP_URL,
-          'X-Title': 'Nomis AI',
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
@@ -1194,13 +1314,11 @@ ${text.slice(0, 3000)}
 
   async analyzeImage(base64, mimeType) {
     const response = await fetchWithKeyFallback(
-      'https://openrouter.ai/api/v1/chat/completions',
+      REWIND_BASE_URL,
       (key) => ({
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${key}`,
-          'HTTP-Referer': APP_URL,
-          'X-Title': 'Nomis AI',
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
@@ -2244,13 +2362,11 @@ document.addEventListener('click', e => { if (e.target.closest('#share-chat-btn'
 async function generateChatTitle(chatId, firstMessage) {
   try {
     const response = await fetchWithKeyFallback(
-      'https://openrouter.ai/api/v1/chat/completions',
+      REWIND_BASE_URL,
       (key) => ({
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${key}`,
-          'HTTP-Referer': APP_URL,
-          'X-Title': 'Nomis AI',
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
@@ -2291,15 +2407,13 @@ async function streamCompletion({ messages, targetBubble, hasImage = false, onDo
   let response = null;
   let lastErr = null;
 
-  for (let attempt = 0; attempt < OPENROUTER_API_KEYS.length; attempt++) {
+  for (let attempt = 0; attempt < REWIND_API_KEYS.length; attempt++) {
     const key = getActiveKey();
     try {
-      const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      const r = await fetch(REWIND_BASE_URL, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${key}`,
-          'HTTP-Referer': APP_URL,
-          'X-Title': 'Nomis AI',
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ model, messages, stream: true, max_tokens: maxTokens, temperature }),
@@ -2315,8 +2429,8 @@ async function streamCompletion({ messages, targetBubble, hasImage = false, onDo
       const errMsg = errData?.error?.message || '';
 
       if (isOutOfCreditsError(r.status, errMsg)) {
-        console.warn(`[KeyPool/Stream] Key index ${_activeKeyIndex} out of credits. Rotating…`);
-        if (!rotateKey()) throw new Error('All API keys are out of credits. Please add more credits or additional keys.');
+        console.warn(`[KeyPool/Stream] Key index ${_activeKeyIndex} out of tokens. Rotating…`);
+        if (!rotateKey()) throw new Error('All API keys are out of tokens. Please add more tokens or additional keys.');
         continue;
       }
 
@@ -2530,11 +2644,11 @@ async function retryLastMessage(row, bubble) {
     ];
 
     let response = null;
-    for (let attempt = 0; attempt < OPENROUTER_API_KEYS.length; attempt++) {
+    for (let attempt = 0; attempt < REWIND_API_KEYS.length; attempt++) {
       const key = getActiveKey();
-      const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      const r = await fetch(REWIND_BASE_URL, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${key}`, 'HTTP-Referer': APP_URL, 'X-Title': 'Nomis AI', 'Content-Type': 'application/json' },
+        headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ model, messages, stream: true, max_tokens: state.isDegraded ? 300 : 1024, temperature: state.isDegraded ? 0.6 : (state.mode === 'sidekick' ? 0.5 : 1.0) })
       });
       if (r.ok) { response = r; break; }
@@ -2542,7 +2656,7 @@ async function retryLastMessage(row, bubble) {
       try { errData = await r.clone().json(); } catch {}
       const errMsg = errData?.error?.message || '';
       if (isOutOfCreditsError(r.status, errMsg)) {
-        if (!rotateKey()) throw new Error('All API keys are out of credits.');
+        if (!rotateKey()) throw new Error('All API keys are out of tokens.');
         continue;
       }
       throw new Error(errMsg || `API error ${r.status}`);
