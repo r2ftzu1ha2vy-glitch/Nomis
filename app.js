@@ -114,31 +114,12 @@ async function fetchWithKeyFallback(url, buildOptions, pool = REWIND_API_KEYS, g
       return response; // success
     }
 
-    // 429 = rate-limited, not dead. Back off and retry the SAME key
-    // a couple times before giving up on this attempt entirely.
+    // 429 = rate-limited, not dead — and not worth retrying. A retry is
+    // a full new billable request; for a sustained rate limit it almost
+    // certainly fails again immediately. Fail fast instead of spending
+    // extra requests on a near-guaranteed repeat 429.
     if (response.status === 429) {
-      let rateLimitRetries = 0;
-      let stillRateLimited = true;
-      while (rateLimitRetries < 2) {
-        rateLimitRetries++;
-        const waitMs = 1000 * rateLimitRetries;
-        console.warn(`[KeyPool] 429 rate-limited. Waiting ${waitMs}ms before retry ${rateLimitRetries}/2…`);
-        await new Promise(r => setTimeout(r, waitMs));
-        try {
-          response = await fetch(url, options);
-        } catch (networkErr) {
-          throw networkErr;
-        }
-        if (response.ok) return response;
-        if (response.status !== 429) { stillRateLimited = false; break; }
-      }
-      // Backoff exhausted and still 429 — this is not a dead key.
-      // Rotating would just spend the next key's request on a limit
-      // that likely applies above the per-key level. Stop here instead
-      // of continuing the attempt loop into rotation.
-      if (stillRateLimited) {
-        throw new Error('Rate limited by the API. Please wait a moment and try again.');
-      }
+      throw new Error('Rate limited by the API. Please wait a moment and try again.');
     }
 
     // Try to parse error body
@@ -1317,122 +1298,6 @@ const ImageGen = {
 };
 
 /* ════════════════════════════════════════
-   AI DETECTION SYSTEM
-════════════════════════════════════════ */
-const AIDetector = {
-  async analyzeText(text) {
-    const response = await fetchWithKeyFallback(
-      REWIND_BASE_URL,
-      (key) => ({
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${key}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: getActiveModel(),
-          max_tokens: 400,
-          temperature: 0.1,
-          messages: [{
-            role: 'user',
-            content: `You are an expert forensic AI detection system. Analyse the following text and determine the probability it was written by an AI vs a human.
-
-Return ONLY a valid JSON object in this exact format, nothing else:
-{
-  "verdict": "AI-Generated" | "Likely AI" | "Uncertain" | "Likely Human" | "Human-Written",
-  "confidence": <0-100 integer>,
-  "ai_probability": <0-100 integer>,
-  "signals": ["signal 1", "signal 2", "signal 3"],
-  "reasoning": "One sentence explanation."
-}
-
-Text to analyse:
-"""
-${text.slice(0, 3000)}
-"""`
-          }]
-        })
-      })
-    );
-    const data = await response.json();
-    const raw = data.choices?.[0]?.message?.content || '{}';
-    try { return JSON.parse(raw.replace(/```json|```/g, '').trim()); }
-    catch { return null; }
-  },
-
-  async analyzeImage(base64, mimeType) {
-    const response = await fetchWithKeyFallback(
-      REWIND_BASE_URL,
-      (key) => ({
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${key}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: getActiveModel(),
-          max_tokens: 400,
-          temperature: 0.1,
-          messages: [{
-            role: 'user',
-            content: [
-              { type: 'image_url', imageUrl: { url: `data:${mimeType};base64,${base64}` } },
-              { type: 'text', text: `You are an expert AI image detection system. Analyse this image for signs it was AI-generated vs photographed or hand-made by a human.
-
-Return ONLY a valid JSON object in this exact format, nothing else:
-{
-  "verdict": "AI-Generated" | "Likely AI" | "Uncertain" | "Likely Human" | "Human-Taken",
-  "confidence": <0-100 integer>,
-  "ai_probability": <0-100 integer>,
-  "signals": ["signal 1", "signal 2", "signal 3"],
-  "reasoning": "One sentence explanation."
-}` }
-            ]
-          }]
-        })
-      })
-    );
-    const data = await response.json();
-    const raw = data.choices?.[0]?.message?.content || '{}';
-    try { return JSON.parse(raw.replace(/```json|```/g, '').trim()); }
-    catch { return null; }
-  },
-
-  renderResult(result) {
-    if (!result) return '<div style="color:rgba(255,107,107,0.8);font-family:EB Garamond,serif;font-size:14px;">Detection failed. Please try again.</div>';
-    const pct = result.ai_probability ?? 0;
-    const colorMap = {
-      'AI-Generated': '#ff6b6b', 'Likely AI': '#ffaa4d', 'Uncertain': '#b8960c',
-      'Likely Human': '#4dbb7f', 'Human-Written': '#4dbb7f', 'Human-Taken': '#4dbb7f',
-    };
-    const color = colorMap[result.verdict] || '#b8960c';
-    const barColor = pct > 70 ? '#ff6b6b' : pct > 40 ? '#ffaa4d' : '#4dbb7f';
-    return `
-      <div style="margin-top:12px;padding:16px 18px;background:rgba(10,8,18,0.6);border:1px solid rgba(184,150,12,0.2);border-radius:12px;font-family:'Cinzel',serif;">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
-          <span style="font-size:9px;letter-spacing:2px;color:var(--gold-dim);text-transform:uppercase;">AI Detection Result</span>
-          <span style="font-size:10px;font-weight:700;letter-spacing:1.5px;padding:4px 12px;border-radius:20px;background:${color}18;color:${color};border:1px solid ${color}40;">${result.verdict}</span>
-        </div>
-        <div style="margin-bottom:12px;">
-          <div style="display:flex;justify-content:space-between;margin-bottom:5px;">
-            <span style="font-size:9px;letter-spacing:1.5px;color:var(--gold-dim);">AI PROBABILITY</span>
-            <span style="font-size:11px;font-weight:700;color:${barColor};">${pct}%</span>
-          </div>
-          <div style="height:4px;background:rgba(255,255,255,0.08);border-radius:4px;overflow:hidden;">
-            <div style="height:100%;width:${pct}%;background:${barColor};border-radius:4px;transition:width 0.8s ease;"></div>
-          </div>
-        </div>
-        <div style="margin-bottom:10px;">
-          ${result.signals?.map(s => `<div style="font-family:'EB Garamond',serif;font-size:12px;color:rgba(245,240,220,0.65);padding:2px 0;">✦ ${s}</div>`).join('') || ''}
-        </div>
-        <div style="font-family:'EB Garamond',serif;font-size:13px;color:rgba(245,240,220,0.5);font-style:italic;border-top:1px solid rgba(184,150,12,0.1);padding-top:8px;">
-          ${result.reasoning || ''}
-        </div>
-      </div>`;
-  }
-};
-
-/* ════════════════════════════════════════
    IMAGE EDITOR — Pollinations img2img
 ════════════════════════════════════════ */
 const ImageEditor = {
@@ -2476,27 +2341,11 @@ async function streamCompletion({ messages, targetBubble, hasImage = false, onDo
         break;
       }
 
-      // 429 = rate-limited, not dead. Back off and retry the SAME key first.
+      // 429 = rate-limited, not dead — and not worth retrying. Fail fast
+      // instead of spending an extra billable request on a near-certain
+      // repeat 429.
       if (r.status === 429) {
-        let stillRateLimited = true;
-        for (let rl = 1; rl <= 2; rl++) {
-          const waitMs = 1000 * rl;
-          console.warn(`[KeyPool/Stream] 429 rate-limited. Waiting ${waitMs}ms before retry ${rl}/2…`);
-          await new Promise(res => setTimeout(res, waitMs));
-          r = await fetch(REWIND_BASE_URL, {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model, messages, stream: true, max_tokens: maxTokens, temperature }),
-          });
-          if (r.ok) { response = r; break; }
-          if (r.status !== 429) { stillRateLimited = false; break; }
-        }
-        if (response) break;
-        // Backoff exhausted and still 429 — not a dead key. Stop instead
-        // of letting this fall through into rotation across the pool.
-        if (stillRateLimited) {
-          throw new Error('Rate limited by the API. Please wait a moment and try again.');
-        }
+        throw new Error('Rate limited by the API. Please wait a moment and try again.');
       }
 
       let errData = {};
@@ -2732,24 +2581,9 @@ async function retryLastMessage(row, bubble) {
       });
       if (r.ok) { response = r; break; }
 
-      // 429 = rate-limited, not dead. Back off and retry the SAME key first.
+      // 429 = rate-limited, not dead — and not worth retrying.
       if (r.status === 429) {
-        let stillRateLimited = true;
-        for (let rl = 1; rl <= 2; rl++) {
-          const waitMs = 1000 * rl;
-          await new Promise(res => setTimeout(res, waitMs));
-          r = await fetch(REWIND_BASE_URL, {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
-            body: buildBody()
-          });
-          if (r.ok) { response = r; break; }
-          if (r.status !== 429) { stillRateLimited = false; break; }
-        }
-        if (response) break;
-        if (stillRateLimited) {
-          throw new Error('Rate limited by the API. Please wait a moment and try again.');
-        }
+        throw new Error('Rate limited by the API. Please wait a moment and try again.');
       }
 
       let errData = {};
@@ -2902,27 +2736,10 @@ function wireAssistantActions(row, content, msgIndex) {
   shareBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg> Share`;
   shareBtn.addEventListener('click', shareChat);
 
-  const detectAiBtn = document.createElement('button');
-  detectAiBtn.className = 'action-btn'; detectAiBtn.title = 'Detect if AI-written';
-  detectAiBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><path d="M11 8v3l2 2"/></svg> Detect`;
-  detectAiBtn.addEventListener('click', async () => {
-    detectAiBtn.disabled = true; detectAiBtn.style.opacity = '0.5'; detectAiBtn.textContent = 'Analysing…';
-    const plainText = bubble.innerText;
-    const result = await AIDetector.analyzeText(plainText);
-    const existing = bubble.querySelector('.ai-detect-result'); if (existing) existing.remove();
-    const resultDiv = document.createElement('div'); resultDiv.className = 'ai-detect-result';
-    resultDiv.innerHTML = AIDetector.renderResult(result);
-    bubble.appendChild(resultDiv);
-    detectAiBtn.disabled = false; detectAiBtn.style.opacity = '';
-    detectAiBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg> Re-detect`;
-    scrollToBottom();
-  });
-
   actions.appendChild(retryBtn);
   actions.appendChild(copyBtn);
   actions.appendChild(ttsBtn);
   actions.appendChild(shareBtn);
-  actions.appendChild(detectAiBtn);
 
   const timeDiv = contentDiv.querySelector('.msg-time');
   if (timeDiv) contentDiv.insertBefore(actions, timeDiv);
@@ -2983,29 +2800,11 @@ function createMessageRow(role, content, imagePreview = null, msgIndex = null) {
     const imgActions = document.createElement('div');
     imgActions.style.cssText = 'display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;';
 
-    const imgDetectBtn = document.createElement('button');
-    imgDetectBtn.className = 'action-btn';
-    imgDetectBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg> Detect AI`;
-    imgDetectBtn.addEventListener('click', async () => {
-      if (!state.pendingImage) { showToast('Image data not available.'); return; }
-      imgDetectBtn.disabled = true; imgDetectBtn.style.opacity = '0.5'; imgDetectBtn.textContent = 'Analysing…';
-      const img = state.pendingImage;
-      const result = await AIDetector.analyzeImage(img.base64, img.mimeType);
-      const existing = bubble.querySelector('.ai-detect-result'); if (existing) existing.remove();
-      const resultDiv = document.createElement('div'); resultDiv.className = 'ai-detect-result';
-      resultDiv.innerHTML = AIDetector.renderResult(result);
-      bubble.appendChild(resultDiv);
-      imgDetectBtn.disabled = false; imgDetectBtn.style.opacity = '';
-      imgDetectBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg> Re-detect`;
-      scrollToBottom();
-    });
-
     const imgEditBtn = document.createElement('button');
     imgEditBtn.className = 'action-btn';
     imgEditBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg> Edit Image`;
     imgEditBtn.addEventListener('click', () => ImageEditor.openEditor(imagePreview, bubble));
 
-    imgActions.appendChild(imgDetectBtn);
     imgActions.appendChild(imgEditBtn);
     bubble.appendChild(imgActions);
   }
@@ -3039,26 +2838,6 @@ function createMessageRow(role, content, imagePreview = null, msgIndex = null) {
     editBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg> Edit`;
     editBtn.addEventListener('click', () => enableMessageEditing(row, bubble, capturedIndex));
     editActions.appendChild(editBtn);
-
-    const textContent2 = (typeof content === 'string' ? content : '').replace('\n[Image attached]', '').trim();
-    if (textContent2.length > 30) {
-      const detectBtn = document.createElement('button');
-      detectBtn.className = 'action-btn'; detectBtn.title = 'Detect if AI-written';
-      detectBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><path d="M11 8v3l2 2"/></svg> Detect AI`;
-      detectBtn.addEventListener('click', async () => {
-        detectBtn.disabled = true; detectBtn.style.opacity = '0.5';
-        detectBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg> Analysing…`;
-        const result = await AIDetector.analyzeText(textContent2);
-        const existing = bubble.querySelector('.ai-detect-result'); if (existing) existing.remove();
-        const resultDiv = document.createElement('div'); resultDiv.className = 'ai-detect-result';
-        resultDiv.innerHTML = AIDetector.renderResult(result);
-        bubble.appendChild(resultDiv);
-        detectBtn.disabled = false; detectBtn.style.opacity = '';
-        detectBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg> Re-detect`;
-        scrollToBottom();
-      });
-      editActions.appendChild(detectBtn);
-    }
 
     contentDiv.appendChild(editActions);
   }
