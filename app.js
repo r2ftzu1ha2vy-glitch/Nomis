@@ -13,6 +13,7 @@ const REWIND_API_KEYS = [
    'sk-rewind-ec202c4ad1437181c1fd8b2ad85225ff',
    'sk-rewind-237d9ad83be19e5f0ae6bcd7305cb9dd',
    'sk-rewind-8349cce575860d2dafc5b63708b3dbf1',
+   'sk-rewind-8c064d477700c03a677eb04d6e60cf0c',
   // Add more keys here as needed:
   // 'sk-rewind-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
   // 'sk-rewind-YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY',
