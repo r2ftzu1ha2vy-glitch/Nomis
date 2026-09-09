@@ -18,6 +18,7 @@ const REWIND_API_KEYS = [
    'sk-rewind-ed5093af76ffd1d862a2c02b6808a558',
    'sk-rewind-5c54acad66f5bec41b83edc97acad2cf',
    'sk-rewind-c771603899d5484611471babe8bcb240',
+   'sk-rewind-938f9a2ff5c7800ebece947e86a37784',
   // Add more keys here as needed:
   // 'sk-rewind-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
   // 'sk-rewind-YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY',
@@ -33,7 +34,7 @@ const REWIND_BASE_URL = 'https://api.rewind.ai/v1/chat/completions';
 // chat would pay for roughly 1+2+...+20 = 210 message-turns of input
 // tokens instead of 20. This was the primary driver of daily token
 // burn, far larger than any single image or chat call.
-const MAX_HISTORY_MESSAGES = 20;
+const MAX_HISTORY_MESSAGES = 10;
 const REWIND_IMAGE_URL = 'https://api.rewind.ai/v1/images/generations';
 
 const DAILY_IMAGE_LIMIT = 3;
@@ -2326,7 +2327,7 @@ async function streamCompletion({ messages, targetBubble, hasImage = false, onDo
   resetKeyPool();
 
   const model = getActiveModel(hasImage);
-  const maxTokens = state.isDegraded ? 300 : 512;
+  const maxTokens = state.isDegraded ? 300 : 1000;
   const temperature = state.isDegraded ? 0.5 : (state.mode === 'sidekick' ? 0.2 : 0.8);
 
   // For streaming we need to handle key rotation differently —
@@ -2334,7 +2335,17 @@ async function streamCompletion({ messages, targetBubble, hasImage = false, onDo
   let response = null;
   let lastErr = null;
 
-  for (let attempt = 0; attempt < REWIND_API_KEYS.length; attempt++) {
+  // 429 handling: rotate key-to-key (wrapping back to key 0 after the
+  // last key) for up to RATE_LIMIT_DEADLINE_MS total. If nothing has
+  // succeeded by the deadline, stop and surface a distinct
+  // "server unavailable" error rather than continuing indefinitely.
+  // This is separate from isOutOfCreditsError rotation below, which
+  // handles genuinely dead/exhausted keys (401/402/403) and correctly
+  // stops once every key has been tried once.
+  const RATE_LIMIT_DEADLINE_MS = 15000;
+  let rateLimitDeadline = null;
+
+  for (let attempt = 0; ; attempt++) {
     const key = getActiveKey();
     try {
       let r = await fetch(REWIND_BASE_URL, {
@@ -2351,11 +2362,16 @@ async function streamCompletion({ messages, targetBubble, hasImage = false, onDo
         break;
       }
 
-      // 429 = rate-limited, not dead — and not worth retrying. Fail fast
-      // instead of spending an extra billable request on a near-certain
-      // repeat 429.
+      // 429 = rate-limited, not dead. Rotate to the next key (wrapping
+      // around past the last one) and keep trying within the deadline.
       if (r.status === 429) {
-        throw new Error('Rate limited by the API. Please wait a moment and try again.');
+        if (rateLimitDeadline === null) rateLimitDeadline = Date.now() + RATE_LIMIT_DEADLINE_MS;
+        if (Date.now() >= rateLimitDeadline) {
+          throw new Error('Server Currently Unavailable');
+        }
+        _activeKeyIndex = (_activeKeyIndex + 1) % REWIND_API_KEYS.length;
+        console.warn(`[KeyPool/Stream] 429 rate-limited. Rotated to key index ${_activeKeyIndex}…`);
+        continue;
       }
 
       let errData = {};
@@ -2371,7 +2387,7 @@ async function streamCompletion({ messages, targetBubble, hasImage = false, onDo
       throw new Error(errMsg || `API error ${r.status}`);
     } catch (networkErr) {
       if (networkErr.message.includes('API keys')) throw networkErr;
-      if (networkErr.message.includes('Rate limited')) throw networkErr;
+      if (networkErr.message.includes('Server Currently Unavailable')) throw networkErr;
       lastErr = networkErr;
       if (!rotateKey()) throw lastErr;
     }
@@ -2511,10 +2527,24 @@ async function sendMessage() {
     const windowedHistory = fullHistory.length > MAX_HISTORY_MESSAGES
       ? fullHistory.slice(-MAX_HISTORY_MESSAGES)
       : fullHistory;
-    const historyMessages = windowedHistory.map(m => ({
-      role: m.role,
-      content: typeof m.content === 'string' ? m.content.replace('\n[Image attached]', '[image was attached to this message]') : m.content
-    }));
+    const historyMessages = windowedHistory.map(m => {
+      if (Array.isArray(m.content)) {
+        // Historical message contained an image (base64 image_url part).
+        // Resending that full base64 payload on every subsequent turn is
+        // extremely token-expensive and unnecessary — the model only
+        // needs to know an image was there, not see it again. Replace
+        // with a lightweight text placeholder instead.
+        const textPart = m.content.find(p => p.type === 'text');
+        return {
+          role: m.role,
+          content: (textPart?.text || '') + ' [image was attached to this message]'
+        };
+      }
+      return {
+        role: m.role,
+        content: typeof m.content === 'string' ? m.content.replace('\n[Image attached]', '[image was attached to this message]') : m.content
+      };
+    });
     const currentUserContent = buildUserContent(text || (capturedImage ? 'Please describe and analyse this image in detail.' : ''), capturedImage);
     const messages = [
       { role: 'user', content: systemPrompt + '\n\n[Begin conversation]' },
@@ -2578,16 +2608,28 @@ async function retryLastMessage(row, bubble) {
 
   try {
     const { systemPrompt } = buildSystemMessages();
+    const windowedForRetry = state.messages.length > MAX_HISTORY_MESSAGES
+      ? state.messages.slice(-MAX_HISTORY_MESSAGES)
+      : state.messages;
+    const strippedHistory = windowedForRetry.map(m => {
+      if (Array.isArray(m.content)) {
+        const textPart = m.content.find(p => p.type === 'text');
+        return { role: m.role, content: (textPart?.text || '') + ' [image was attached to this message]' };
+      }
+      return { role: m.role, content: m.content };
+    });
     const messages = [
       { role: 'user', content: systemPrompt + '\n\n[Begin conversation. Provide a DIFFERENT response — vary phrasing, structure, and approach.]' },
       { role: 'assistant', content: 'Understood. I will approach this differently.' },
-      ...state.messages.map(m => ({ role: m.role, content: m.content }))
+      ...strippedHistory
     ];
 
     let response = null;
-    for (let attempt = 0; attempt < REWIND_API_KEYS.length; attempt++) {
+    let rateLimitDeadline = null;
+    const RATE_LIMIT_DEADLINE_MS = 15000;
+    for (let attempt = 0; ; attempt++) {
       const key = getActiveKey();
-      const buildBody = () => JSON.stringify({ model, messages, stream: true, max_tokens: state.isDegraded ? 300 : 512, temperature: state.isDegraded ? 0.6 : (state.mode === 'sidekick' ? 0.5 : 1.0) });
+      const buildBody = () => JSON.stringify({ model, messages, stream: true, max_tokens: state.isDegraded ? 300 : 1000, temperature: state.isDegraded ? 0.6 : (state.mode === 'sidekick' ? 0.5 : 1.0) });
       let r = await fetch(REWIND_BASE_URL, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
@@ -2595,9 +2637,15 @@ async function retryLastMessage(row, bubble) {
       });
       if (r.ok) { response = r; break; }
 
-      // 429 = rate-limited, not dead — and not worth retrying.
+      // 429 = rate-limited, not dead. Rotate to the next key (wrapping
+      // past the last one) and keep trying within the deadline.
       if (r.status === 429) {
-        throw new Error('Rate limited by the API. Please wait a moment and try again.');
+        if (rateLimitDeadline === null) rateLimitDeadline = Date.now() + RATE_LIMIT_DEADLINE_MS;
+        if (Date.now() >= rateLimitDeadline) {
+          throw new Error('Server Currently Unavailable');
+        }
+        _activeKeyIndex = (_activeKeyIndex + 1) % REWIND_API_KEYS.length;
+        continue;
       }
 
       let errData = {};
@@ -2694,7 +2742,13 @@ function enableMessageEditing(row, bubble, msgIndex) {
       const windowedMessages = state.messages.length > MAX_HISTORY_MESSAGES
         ? state.messages.slice(-MAX_HISTORY_MESSAGES)
         : state.messages;
-      const messages = [{ role: 'user', content: systemPrompt + '\n\n[Begin conversation]' }, { role: 'assistant', content: assistantIntro }, ...windowedMessages.map(m => ({ role: m.role, content: m.content }))];
+      const messages = [{ role: 'user', content: systemPrompt + '\n\n[Begin conversation]' }, { role: 'assistant', content: assistantIntro }, ...windowedMessages.map(m => {
+        if (Array.isArray(m.content)) {
+          const textPart = m.content.find(p => p.type === 'text');
+          return { role: m.role, content: (textPart?.text || '') + ' [image was attached to this message]' };
+        }
+        return { role: m.role, content: m.content };
+      })];
       thinkingRow.remove();
       const assistantRow = createMessageRow('assistant', '');
       const newBubble = assistantRow.querySelector('.msg-bubble');
