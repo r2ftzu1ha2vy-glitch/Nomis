@@ -24,6 +24,16 @@ const REWIND_API_KEYS = [
 ];
 
 const REWIND_BASE_URL = 'https://api.rewind.ai/v1/chat/completions';
+
+// How many prior turns get resent as context on each new API call.
+// Everything beyond this window is dropped from what's SENT to the
+// API only — nothing is deleted from state.messages, storage, or the
+// visible chat. Without a cap, the entire conversation transcript gets
+// retransmitted as input tokens on every single turn: a 20-message
+// chat would pay for roughly 1+2+...+20 = 210 message-turns of input
+// tokens instead of 20. This was the primary driver of daily token
+// burn, far larger than any single image or chat call.
+const MAX_HISTORY_MESSAGES = 20;
 const REWIND_IMAGE_URL = 'https://api.rewind.ai/v1/images/generations';
 
 const DAILY_IMAGE_LIMIT = 3;
@@ -2316,7 +2326,7 @@ async function streamCompletion({ messages, targetBubble, hasImage = false, onDo
   resetKeyPool();
 
   const model = getActiveModel(hasImage);
-  const maxTokens = state.isDegraded ? 300 : 1024;
+  const maxTokens = state.isDegraded ? 300 : 512;
   const temperature = state.isDegraded ? 0.5 : (state.mode === 'sidekick' ? 0.2 : 0.8);
 
   // For streaming we need to handle key rotation differently —
@@ -2497,7 +2507,11 @@ async function sendMessage() {
 
   try {
     const { systemPrompt, assistantIntro } = buildSystemMessages();
-    const historyMessages = state.messages.slice(0, -1).map(m => ({
+    const fullHistory = state.messages.slice(0, -1);
+    const windowedHistory = fullHistory.length > MAX_HISTORY_MESSAGES
+      ? fullHistory.slice(-MAX_HISTORY_MESSAGES)
+      : fullHistory;
+    const historyMessages = windowedHistory.map(m => ({
       role: m.role,
       content: typeof m.content === 'string' ? m.content.replace('\n[Image attached]', '[image was attached to this message]') : m.content
     }));
@@ -2573,7 +2587,7 @@ async function retryLastMessage(row, bubble) {
     let response = null;
     for (let attempt = 0; attempt < REWIND_API_KEYS.length; attempt++) {
       const key = getActiveKey();
-      const buildBody = () => JSON.stringify({ model, messages, stream: true, max_tokens: state.isDegraded ? 300 : 1024, temperature: state.isDegraded ? 0.6 : (state.mode === 'sidekick' ? 0.5 : 1.0) });
+      const buildBody = () => JSON.stringify({ model, messages, stream: true, max_tokens: state.isDegraded ? 300 : 512, temperature: state.isDegraded ? 0.6 : (state.mode === 'sidekick' ? 0.5 : 1.0) });
       let r = await fetch(REWIND_BASE_URL, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
@@ -2677,7 +2691,10 @@ function enableMessageEditing(row, bubble, msgIndex) {
     messagesList.appendChild(thinkingRow); scrollToBottom();
     try {
       const { systemPrompt, assistantIntro } = buildSystemMessages();
-      const messages = [{ role: 'user', content: systemPrompt + '\n\n[Begin conversation]' }, { role: 'assistant', content: assistantIntro }, ...state.messages.map(m => ({ role: m.role, content: m.content }))];
+      const windowedMessages = state.messages.length > MAX_HISTORY_MESSAGES
+        ? state.messages.slice(-MAX_HISTORY_MESSAGES)
+        : state.messages;
+      const messages = [{ role: 'user', content: systemPrompt + '\n\n[Begin conversation]' }, { role: 'assistant', content: assistantIntro }, ...windowedMessages.map(m => ({ role: m.role, content: m.content }))];
       thinkingRow.remove();
       const assistantRow = createMessageRow('assistant', '');
       const newBubble = assistantRow.querySelector('.msg-bubble');
