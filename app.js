@@ -109,6 +109,7 @@ async function fetchWithKeyFallback(url, buildOptions, pool = REWIND_API_KEYS, g
   // must not carry over and bias every future unrelated call.
   if (pool === REWIND_API_KEYS) resetKeyPool();
 
+  let lastKeyErr = '';
   for (let attempt = 0; attempt < pool.length; attempt++) {
     const key = getKeyFn();
     const options = buildOptions(key);
@@ -139,9 +140,10 @@ async function fetchWithKeyFallback(url, buildOptions, pool = REWIND_API_KEYS, g
     const errMsg = errData?.error?.message || '';
 
     if (isOutOfCreditsError(response.status, errMsg)) {
-      console.warn(`[KeyPool] Key exhausted its tokens. Rotating…`);
+      console.warn(`[KeyPool] Key rejected (HTTP ${response.status}). Rotating…`);
+      lastKeyErr = errMsg || `HTTP ${response.status}`;
       if (!rotateFn()) {
-        throw new Error('All API keys are out of tokens. Please add more tokens or additional keys.');
+        throw new Error(`All API keys were rejected (last error: ${lastKeyErr}).`);
       }
       // Continue loop with new key
       continue;
@@ -200,6 +202,18 @@ const ImageLimit = {
     return { allowed: true, remaining: Math.max(0, DAILY_IMAGE_LIMIT - count), resetsAt: new Date(windowStart + IMAGE_LIMIT_WINDOW_MS) };
   },
 
+  /** Gives back one slot after a generation that failed, so failures don't eat the daily quota. */
+  async refund(uid) {
+    if (Nomits.isInfinite()) return;
+    try {
+      const data = await this._getState(uid);
+      const windowExpired = !data.windowStart || (Date.now() - data.windowStart) >= IMAGE_LIMIT_WINDOW_MS;
+      if (windowExpired) return;
+      const count = Math.max(0, (data.count || 0) - 1);
+      await set(ref(db, `users/${uid}/imageLimit`), { count, windowStart: data.windowStart });
+    } catch { /* best effort */ }
+  },
+
   /** Formats a reset Date as "Wednesday, 4:32 PM". */
   formatReset(date) {
     if (!date) return 'soon';
@@ -215,8 +229,15 @@ const ImageLimit = {
    1.2–1.4 → Claude Sonnet 5 (fallback GPT-4o)
    Image gen → FLUX.2 Klein 4B (all versions)
 ════════════════════════════════════════ */
-const MODEL_IMAGE         = 'openai/gpt-image-2';
-const MODEL_IMAGE_CREATOR = 'openai/gpt-image-2';
+// Image GENERATION model — used only by ImageGen._generateViaAPI against REWIND_IMAGE_URL.
+// UNVERIFIED: slug carried over from the original file; confirm it against your Rewind model list.
+const MODEL_IMAGE_GEN = 'openai/gpt-image-2';
+
+// VISION (chat with an attached image) must be a multimodal CHAT model. The original code
+// pointed this at the image-generation model, which cannot answer chat completions.
+// UNVERIFIED slugs: taken from the "Switching to Gemini 2.5 ..." toast in sendMessage().
+const MODEL_VISION         = 'google/gemini-2.5-flash';
+const MODEL_VISION_CREATOR = 'google/gemini-2.5-pro';
 
 const VERSION_MODEL_MAP = {
   '1.0': 'meta-llama/llama-3-70b-instruct',   // swap to 'qwen/qwen-3-72b-instruct' if preferred
@@ -231,7 +252,7 @@ const MODEL_FALLBACK_1_2_TO_1_4 = 'openai/gpt-4o'; // used only if Claude Sonnet
 function getActiveModel(hasImage = false) {
   if (hasImage) {
     const isCreator = state?.user?.email === OWNER_EMAIL;
-    return isCreator ? MODEL_IMAGE_CREATOR : MODEL_IMAGE;
+    return isCreator ? MODEL_VISION_CREATOR : MODEL_VISION;
   }
   return VERSION_MODEL_MAP[state.nomisVersion] || VERSION_MODEL_MAP['1.4'];
 }
@@ -1081,11 +1102,43 @@ async function refreshDegradedState() {
    key pool like all other requests.
 ════════════════════════════════════════ */
 const ImageGen = {
-  hasToken(text) { return /\[GENERATE_IMAGE:\s*(.+?)\]/i.test(text); },
+  // [\s\S] instead of '.' so prompts the model wraps over several lines still match.
+  // The old '.+?' failed on any newline, the token then fell through to the "strip it"
+  // branch, and the user saw text with no image at all.
+  TOKEN_RE: /\[GENERATE_IMAGE:\s*(\S[\s\S]*?)\]/i,
+
+  hasToken(text) { return this.TOKEN_RE.test(text); },
 
   extractPrompt(text) {
-    const match = text.match(/\[GENERATE_IMAGE:\s*(.+?)\]/i);
-    return match ? match[1].trim() : null;
+    const match = text.match(this.TOKEN_RE);
+    const prompt = match ? match[1].replace(/\s+/g, ' ').trim() : '';
+    return prompt || null;
+  },
+
+  /** Removes a complete token, or an unterminated one cut off at the end of the text. */
+  stripToken(text) {
+    return String(text).replace(/\[GENERATE_IMAGE:[\s\S]*?(?:\]|$)/gi, '').trim();
+  },
+
+  /** What to show while streaming: the token (complete or still arriving) becomes a status line. */
+  streamingView(text) {
+    return String(text).replace(/\[GENERATE_IMAGE:[\s\S]*?(?:\]|$)/gi, '⏳ Generating image…');
+  },
+
+  /** Placeholder for a saved chat: generated images are not persisted, so offer to make it again. */
+  renderPlaceholder(container, prompt) {
+    const card = this._makeCard();
+    card.innerHTML = `
+      <div style="display:flex;flex-direction:column;align-items:center;gap:8px;padding:20px;text-align:center;">
+        <span style="font-family:'Cinzel',serif;font-size:10px;letter-spacing:1.5px;color:var(--gold-dim);">✦ Image from an earlier session</span>
+        <span style="font-family:'EB Garamond',serif;font-size:13px;opacity:0.6;max-width:90%;">${escHtml(prompt)}</span>
+        <button class="action-btn imggen-again" style="font-size:9px;letter-spacing:1px;">Generate again</button>
+      </div>`;
+    card.querySelector('.imggen-again').addEventListener('click', async () => {
+      await this._loadAndRenderImage(card, prompt, state.user?.uid);
+      scrollToBottom();
+    });
+    container.appendChild(card);
   },
 
   _makeLoader() {
@@ -1181,7 +1234,10 @@ const ImageGen = {
    * Returns a URL or base64 data URL of the generated image.
    */
   async _generateViaAPI(prompt) {
-    const enhancedPrompt = `Photorealistic, highly detailed, visually stunning, professional photography quality, perfect lighting and composition, matching exactly what the user asked for with no missing or altered details. ${prompt}. Ensure the result looks natural and appealing to a human viewer — correct anatomy, coherent proportions, clean linework, no distortions or artifacts.`;
+    // The chat model already expands the request (see the system prompts), so send it as written.
+    // The old wrapper forced "Photorealistic ... professional photography" onto every image,
+    // overriding anime, painting, logo and illustration requests.
+    const enhancedPrompt = prompt;
 
     const response = await fetchWithKeyFallback(
       REWIND_IMAGE_URL,
@@ -1192,7 +1248,7 @@ const ImageGen = {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          model: MODEL_IMAGE,
+          model: MODEL_IMAGE_GEN,
           prompt: enhancedPrompt,
           n: 1,
           size: '1024x1024',
@@ -1200,9 +1256,11 @@ const ImageGen = {
       })
     );
 
-    const data = await response.json();
+    let data;
+    try { data = await response.json(); }
+    catch { throw new Error('Image endpoint returned a non-JSON response.'); }
     const entry = data?.data?.[0];
-    if (!entry) throw new Error('No image returned.');
+    if (!entry) throw new Error(data?.error?.message || 'No image returned.');
 
     if (entry.b64_json) return `data:image/png;base64,${entry.b64_json}`;
     if (entry.url) return entry.url;
@@ -1226,6 +1284,7 @@ const ImageGen = {
     card.innerHTML = '';
     card.appendChild(loader);
     const timerInterval = this._startTimer(loader);
+    let slotConsumed = false;
 
     try {
       const limitResult = await ImageLimit.consume(uid);
@@ -1236,30 +1295,25 @@ const ImageGen = {
         scrollToBottom();
         return;
       }
+      slotConsumed = true;
 
       const imageUrl = await this._generateViaAPI(prompt);
       clearInterval(timerInterval);
 
       if (!imageUrl) throw new Error('No image URL returned.');
 
-      loader.remove();
-
+      // Load first, swap second: if the load fails the loader is still in the DOM to show the error.
       const img = document.createElement('img');
       img.alt = prompt;
       img.style.cssText = 'display:block;width:100%;max-height:600px;object-fit:contain;background:#000;';
-      img.src = imageUrl;
-
       await new Promise((resolve, reject) => {
-        img.onload = resolve;
-        img.onerror = () => {
-          // If URL load fails, it might already be a data URL that browsers handle differently
-          // Try rendering anyway
-          resolve();
-        };
-        // Timeout fallback
-        setTimeout(resolve, 15000);
+        const t = setTimeout(() => reject(new Error('The image took too long to load.')), 20000);
+        img.onload = () => { clearTimeout(t); resolve(); };
+        img.onerror = () => { clearTimeout(t); reject(new Error('The returned image could not be displayed.')); };
+        img.src = imageUrl;
       });
 
+      loader.remove();
       card.appendChild(img);
 
       const remaining = limitResult.remaining === Infinity ? '∞' : limitResult.remaining;
@@ -1268,13 +1322,16 @@ const ImageGen = {
         scrollToBottom();
       });
 
-      // Wire up Save button
-      meta.querySelector('.imggen-dl').addEventListener('click', () => {
+      meta.querySelector('.imggen-dl').addEventListener('click', async () => {
         const a = document.createElement('a');
-        a.href = imageUrl;
         a.download = 'nomis-image.png';
-        a.target = '_blank';
-        a.click();
+        let objUrl = null;
+        try {
+          if (imageUrl.startsWith('data:')) a.href = imageUrl;
+          else { objUrl = URL.createObjectURL(await (await fetch(imageUrl)).blob()); a.href = objUrl; }
+        } catch { a.href = imageUrl; a.target = '_blank'; a.rel = 'noopener'; }
+        document.body.appendChild(a); a.click(); a.remove();
+        if (objUrl) setTimeout(() => URL.revokeObjectURL(objUrl), 10000);
       });
 
       card.appendChild(meta);
@@ -1283,6 +1340,7 @@ const ImageGen = {
     } catch (err) {
       clearInterval(timerInterval);
       console.error('[ImageGen] Generation failed:', err);
+      if (slotConsumed) { ImageLimit.refund(uid); }
       loader.innerHTML = `
         <span style="color:rgba(255,107,107,0.75);font-family:'Cinzel',serif;font-size:10px;letter-spacing:1px;padding:0 16px;text-align:center;">
           Image generation failed: ${escHtml(err.message || 'Unknown error')}<br>
@@ -1299,7 +1357,7 @@ const ImageGen = {
   },
 
   async renderIntoBubble(bubble, prompt, rawText) {
-    const cleanText = rawText.replace(/\[GENERATE_IMAGE:\s*.+?\]/i, '').trim();
+    const cleanText = this.stripToken(rawText);
     bubble.innerHTML = renderMarkdown(cleanText);
     const card = this._makeCard();
     bubble.appendChild(card);
@@ -2084,18 +2142,51 @@ if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
 let ttsSpeaking = false;
 let ttsCurrentBtn = null;
 
-function speakText(text, btn) {
-  if (!('speechSynthesis' in window)) { showToast('TTS not supported in this browser.'); return; }
-  if (ttsSpeaking && ttsCurrentBtn === btn) { window.speechSynthesis.cancel(); return; }
-  if (ttsSpeaking) {
-    window.speechSynthesis.cancel();
-    if (ttsCurrentBtn) { ttsCurrentBtn.innerHTML = ttsIconHTML(); ttsCurrentBtn.classList.remove('tts-active'); }
+/* ── FreeTTS (https://freetts.org) ──
+   Set FREETTS_API_KEY to your key. While it is '' the browser voice is used, so nothing breaks.
+   FREETTS_VOICE 'en-US-EricNeural' is DERIVED from the "Eric · English (United States) · Male"
+   label plus the 'en-US-JennyNeural' naming in the docs example. It is not confirmed by a
+   FreeTTS voice list; if the API rejects it, copy the exact voice id from their dashboard.
+   No 'style' is sent: which styles Eric supports is unknown. Max text length is unknown too. */
+const FREETTS_URL     = 'https://freetts.org/api/v1/tts';
+const FREETTS_API_KEY = 'ft_live_DhdKeTnrWGNAar1VJUbjCroEMmjIzYWy';                    // UNSET — paste your ft_live_... key
+const FREETTS_VOICE   = 'en-US-EricNeural';    // derived, see note above
+const FREETTS_FORMAT  = 'mp3';                 // mp3 | mp3-hd | wav | ogg
+
+let ttsAudio = null;
+let ttsRequestId = 0;   // bumped on every stop/start so stale fetches and events are ignored
+
+function ttsReset() {
+  ttsRequestId++;
+  if (ttsAudio) {
+    ttsAudio.onended = ttsAudio.onerror = null;
+    ttsAudio.pause();
+    ttsAudio.removeAttribute('src');
+    ttsAudio.load();
+    ttsAudio = null;
   }
-  const clean = text
+  if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+  if (ttsCurrentBtn) { ttsCurrentBtn.innerHTML = ttsIconHTML(); ttsCurrentBtn.classList.remove('tts-active'); }
+  ttsSpeaking = false; ttsCurrentBtn = null;
+}
+
+function ttsBegin(btn) {
+  ttsReset();
+  ttsCurrentBtn = btn; ttsSpeaking = true;
+  btn.innerHTML = ttsStopHTML(); btn.classList.add('tts-active');
+  return ttsRequestId;
+}
+
+function cleanForTTS(text) {
+  return ImageGen.stripToken(text)
     .replace(/```[\s\S]*?```/g, 'code block.').replace(/`[^`]+`/g, '')
     .replace(/\*\*([^*]+)\*\*/g, '$1').replace(/\*([^*]+)\*/g, '$1')
     .replace(/#{1,3} /g, '').replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-    .replace(/\[GENERATE_IMAGE:[^\]]+\]/gi, '').replace(/\n+/g, ' ').trim();
+    .replace(/\n+/g, ' ').trim();
+}
+
+function speakWithBrowser(clean, btn, id) {
+  if (!('speechSynthesis' in window)) { showToast('TTS not supported in this browser.'); ttsReset(); return; }
   const utterance = new SpeechSynthesisUtterance(clean);
   utterance.rate = 0.95; utterance.pitch = 0.85; utterance.lang = 'en-US';
   const pickVoice = () => {
@@ -2109,9 +2200,57 @@ function speakText(text, btn) {
   };
   pickVoice();
   if (window.speechSynthesis.getVoices().length === 0) window.speechSynthesis.onvoiceschanged = pickVoice;
-  utterance.onstart = () => { ttsSpeaking = true; ttsCurrentBtn = btn; btn.innerHTML = ttsStopHTML(); btn.classList.add('tts-active'); };
-  utterance.onend = utterance.onerror = () => { ttsSpeaking = false; ttsCurrentBtn = null; btn.innerHTML = ttsIconHTML(); btn.classList.remove('tts-active'); };
-  window.speechSynthesis.speak(utterance);
+  utterance.onend = utterance.onerror = () => { if (id === ttsRequestId) ttsReset(); };
+  // Chrome can drop an utterance queued in the same tick as cancel(), so defer the speak() slightly.
+  setTimeout(() => { if (id === ttsRequestId) window.speechSynthesis.speak(utterance); }, 60);
+}
+
+function ttsErrorText(data, status) {
+  const e = data?.error ?? data?.message ?? data?.detail;
+  if (typeof e === 'string' && e) return e;
+  if (e && typeof e.message === 'string') return e.message;
+  return `HTTP ${status}`;
+}
+
+async function speakText(text, btn) {
+  // Clicking the active button stops it, whether it is still loading or already playing.
+  if (ttsCurrentBtn === btn && ttsSpeaking) { ttsReset(); return; }
+
+  const clean = cleanForTTS(text);
+  if (!clean) return;
+  const id = ttsBegin(btn);
+
+  const fallback = (reason) => {
+    if (id !== ttsRequestId) return;
+    console.warn('[TTS] FreeTTS unavailable, using browser voice:', reason);
+    if (FREETTS_API_KEY) showToast('FreeTTS failed (' + reason + ') — using browser voice');
+    const id2 = ttsBegin(btn);
+    speakWithBrowser(clean, btn, id2);
+  };
+
+  if (!FREETTS_API_KEY) { fallback('no API key set'); return; }
+
+  try {
+    const r = await fetch(FREETTS_URL, {
+      method: 'POST',
+      headers: { 'x-api-key': FREETTS_API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: clean, voice: FREETTS_VOICE, output_format: FREETTS_FORMAT }),
+    });
+    let data = null;
+    try { data = await r.json(); } catch { /* non-JSON body */ }
+    if (id !== ttsRequestId) return;                       // stopped or replaced while fetching
+    if (!r.ok) throw new Error(ttsErrorText(data, r.status));
+    if (typeof data?.audio_url !== 'string' || !data.audio_url) throw new Error('response had no audio_url');
+
+    const audio = new Audio(data.audio_url);
+    ttsAudio = audio;
+    audio.onended = () => { if (id === ttsRequestId) ttsReset(); };
+    audio.onerror = () => fallback('audio could not be loaded');
+    await audio.play();
+  } catch (err) {
+    if (id !== ttsRequestId) return;                       // pause() from a stop aborts play(): not an error
+    fallback(err?.message || 'request failed');
+  }
 }
 
 function ttsIconHTML() { return `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg> Listen`; }
@@ -2271,7 +2410,7 @@ function renderSharedChat(data, shareId) {
     <div id="shared-chat-messages">${data.messages.map(m => `
       <div class="shared-msg ${m.role}">
         <div class="shared-msg-label">${m.role === 'user' ? escHtml(data.sharedBy) : (data.personaName || (data.mode === 'sidekick' ? 'Sidekick' : 'Nomis'))}</div>
-        <div class="shared-msg-bubble">${m.role === 'assistant' ? renderMarkdown(m.content) : escHtml(m.content).replace(/\n/g,'<br>')}</div>
+        <div class="shared-msg-bubble">${m.role === 'assistant' ? renderMarkdown(ImageGen.stripToken(m.content)) : escHtml(m.content).replace(/\n/g,'<br>')}</div>
       </div>`).join('')}
     </div>
     <div id="shared-chat-footer"><a href="${window.location.pathname}" class="shared-footer-btn">Start your own conversation →</a></div>`;
@@ -2313,9 +2452,42 @@ async function generateChatTitle(chatId, firstMessage) {
 function buildUserContent(text, imageData) {
   if (!imageData) return text || '';
   return [
-    { type: 'image_url', imageUrl: { url: `data:${imageData.mimeType};base64,${imageData.base64}` } },
+    { type: 'image_url', image_url: { url: `data:${imageData.mimeType};base64,${imageData.base64}` } },
     { type: 'text', text: text || 'Please describe and analyse this image in detail.' }
   ];
+}
+
+/* ════════════════════════════════════════
+   SSE READER
+   Network chunks can end mid-line. The old loops split each chunk on '\n'
+   and dropped any 'data:' line that straddled two chunks — which silently
+   deleted text and could cut a [GENERATE_IMAGE: ...] token in half, so no
+   image was ever requested. This buffers the trailing partial line.
+════════════════════════════════════════ */
+async function consumeSSE(response, onDelta) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  const handleLine = (raw) => {
+    const line = raw.trim();
+    if (!line.startsWith('data:')) return;
+    const data = line.slice(5).trim();
+    if (!data || data === '[DONE]') return;
+    try {
+      const delta = JSON.parse(data).choices?.[0]?.delta?.content || '';
+      if (delta) onDelta(delta);
+    } catch { /* skip malformed chunk */ }
+  };
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+    lines.forEach(handleLine);
+  }
+  buffer += decoder.decode();
+  if (buffer) handleLine(buffer);
 }
 
 /* ════════════════════════════════════════
@@ -2395,35 +2567,19 @@ async function streamCompletion({ messages, targetBubble, hasImage = false, onDo
 
   if (!response) throw lastErr || new Error('Failed to connect to API.');
 
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
   let fullContent = '';
-
-  while (true) {
-    const { done, value } = await reader.read(); if (done) break;
-    const lines = decoder.decode(value, { stream: true }).split('\n').filter(l => l.startsWith('data: '));
-    for (const line of lines) {
-      const data = line.slice(6).trim(); if (data === '[DONE]') continue;
-      try {
-        const delta = JSON.parse(data).choices?.[0]?.delta?.content || '';
-        if (delta) {
-          fullContent += delta;
-          const displayContent = canCurrentVersionGenerateImages()
-            ? fullContent.replace(/\[GENERATE_IMAGE:[^\]]*\]?$/i, '⏳ Generating image…')
-            : fullContent;
-          targetBubble.innerHTML = renderMarkdown(displayContent);
-          addCopyButtons(targetBubble);
-          scrollToBottom();
-        }
-      } catch { /* skip malformed chunk */ }
-    }
-  }
+  await consumeSSE(response, (delta) => {
+    fullContent += delta;
+    targetBubble.innerHTML = renderMarkdown(canCurrentVersionGenerateImages() ? ImageGen.streamingView(fullContent) : fullContent);
+    addCopyButtons(targetBubble);
+    scrollToBottom();
+  });
 
   if (canCurrentVersionGenerateImages() && ImageGen.hasToken(fullContent)) {
     const prompt = ImageGen.extractPrompt(fullContent);
     if (prompt) await ImageGen.renderIntoBubble(targetBubble, prompt, fullContent);
   } else {
-    const cleanContent = fullContent.replace(/\[GENERATE_IMAGE:[^\]]*\]/gi, '').trim();
+    const cleanContent = ImageGen.stripToken(fullContent);
     targetBubble.innerHTML = renderMarkdown(cleanContent);
     addCopyButtons(targetBubble);
   }
@@ -2659,31 +2815,18 @@ async function retryLastMessage(row, bubble) {
     }
     if (!response) throw new Error('Failed to connect to API.');
 
-    const reader = response.body.getReader(); const decoder = new TextDecoder(); let fullContent = '';
-    while (true) {
-      const { done, value } = await reader.read(); if (done) break;
-      const lines = decoder.decode(value, { stream: true }).split('\n').filter(l => l.startsWith('data: '));
-      for (const line of lines) {
-        const data = line.slice(6).trim(); if (data === '[DONE]') continue;
-        try {
-          const delta = JSON.parse(data).choices?.[0]?.delta?.content || '';
-          if (delta) {
-            fullContent += delta;
-            const displayContent = canCurrentVersionGenerateImages()
-              ? fullContent.replace(/\[GENERATE_IMAGE:[^\]]*\]?$/i, '⏳ Generating image…')
-              : fullContent;
-            bubble.innerHTML = renderMarkdown(displayContent);
-            addCopyButtons(bubble);
-            scrollToBottom();
-          }
-        } catch { /* skip */ }
-      }
-    }
+    let fullContent = '';
+    await consumeSSE(response, (delta) => {
+      fullContent += delta;
+      bubble.innerHTML = renderMarkdown(canCurrentVersionGenerateImages() ? ImageGen.streamingView(fullContent) : fullContent);
+      addCopyButtons(bubble);
+      scrollToBottom();
+    });
     if (canCurrentVersionGenerateImages() && ImageGen.hasToken(fullContent)) {
       const prompt = ImageGen.extractPrompt(fullContent);
       if (prompt) await ImageGen.renderIntoBubble(bubble, prompt, fullContent);
     } else {
-      const cleanContent = fullContent.replace(/\[GENERATE_IMAGE:[^\]]*\]/gi, '').trim();
+      const cleanContent = ImageGen.stripToken(fullContent);
       bubble.innerHTML = renderMarkdown(cleanContent);
       addCopyButtons(bubble);
     }
@@ -2882,10 +3025,14 @@ function createMessageRow(role, content, imagePreview = null, msgIndex = null) {
 
   const textContent = typeof content === 'string' ? content.replace('\n[Image attached]', '') : '';
   const textEl = document.createElement('div');
+  const assistantText = typeof content === 'string' ? content : '';
   textEl.innerHTML = role === 'assistant'
-    ? renderMarkdown(typeof content === 'string' ? content : '')
+    ? renderMarkdown(ImageGen.stripToken(assistantText))
     : escHtml(textContent).replace(/\n/g, '<br>');
   bubble.appendChild(textEl);
+  if (role === 'assistant' && ImageGen.hasToken(assistantText)) {
+    ImageGen.renderPlaceholder(bubble, ImageGen.extractPrompt(assistantText));
+  }
 
   const timeDiv = document.createElement('div');
   timeDiv.className = 'msg-time';
