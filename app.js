@@ -93,26 +93,42 @@ function resetKeyPool() {
   _activeKeyIndex = 0;
 }
 
-/** Returns true if the error/response indicates the key is bad and we should try the next one */
-function isOutOfCreditsError(status, errorMessage = '') {
-  // 429 is categorically a rate limit, never a dead key, regardless of
-  // what the error body says. Rewind's 429 body sometimes contains
-  // wording like "insufficient tokens" that overlaps with its dead-key
-  // copy, so the text checks below used to match it and rotate anyway,
-  // defeating the same-key backoff retry and burning through the whole
-  // pool on a limit that isn't applied per-key. Stop it here first.
-  if (status === 429) return false;
+/** Reads an API error response once, as { message, code }. Accepts JSON ({error:{message,code}},
+    {error:"text"}, {message}, {detail}) or a plain-text body. */
+async function readApiError(response) {
+  let raw = '';
+  try { raw = await response.clone().text(); } catch { /* body unreadable */ }
+  let message = '';
+  let code = '';
+  try {
+    const d = JSON.parse(raw);
+    const e = d?.error;
+    if (typeof e === 'string') message = e;
+    else { message = e?.message || ''; code = e?.code ? String(e.code) : ''; }
+    message = message || d?.message || d?.detail || '';
+    code = code || (d?.code ? String(d.code) : '');
+  } catch { /* body was not JSON */ }
+  if (!message) message = raw.replace(/\s+/g, ' ').trim().slice(0, 200);
+  return { message, code };
+}
 
-  const msg = errorMessage.toLowerCase();
-  if (status === 402 || status === 401 || status === 403) return true;
-  return (
-    msg.includes('insufficient tokens') ||
-    msg.includes('insufficient credits') ||
-    msg.includes('out of tokens') ||
-    msg.includes('no tokens remaining') ||
-    msg.includes('invalid api key') ||
-    msg.includes('key expired')
-  );
+function describeApiError(status, info) {
+  return `HTTP ${status}${info.code ? ' ' + info.code : ''}${info.message ? ': ' + info.message : ''}`;
+}
+
+/** Returns true if the response means THIS key cannot serve the request and the next key should be tried.
+    Looks at status, error message and error code, on any status including 429.
+    Known limit: the exact wording Rewind uses for "not enough tokens" is not confirmed, so this matches
+    several likely phrasings. Paste a real out-of-tokens response and the patterns can be tightened. */
+function isOutOfCreditsError(status, errorMessage = '', errorCode = '') {
+  if (status === 401 || status === 402 || status === 403) return true;
+
+  const text = `${errorCode} ${errorMessage}`.toLowerCase();
+
+  // Transient or per-time-window limits are not a dead key: rotating would not help.
+  if (/service_busy|busy|rate.?limit|too many requests|per (minute|second|hour)|\b[rt]pm\b/.test(text)) return false;
+
+  return /insufficient|not enough|out of (tokens|credits)|no (tokens|credits)|(tokens|credits|balance)[^.]{0,30}(exhaust|deplet|remaining|zero|low)|exhausted|payment required|quota (exceeded|exhausted)|invalid api key|key expired/.test(text);
 }
 
 /**
@@ -145,52 +161,30 @@ async function fetchWithKeyFallback(url, buildOptions, pool = REWIND_API_KEYS, g
       return response; // success
     }
 
-    // 429 = rate-limited, not dead — and not worth retrying. A retry is
-    // a full new billable request; for a sustained rate limit it almost
-    // certainly fails again immediately. Fail fast instead of spending
-    // extra requests on a near-guaranteed repeat 429.
-    if (response.status === 429) {
-      // Read the body so the real reason (rate limit vs. exhausted quota) is visible instead of guessed.
-      let detail = '';
-      try {
-        const raw = await response.clone().text();
-        try {
-          const d = JSON.parse(raw);
-          const e = d?.error;
-          detail = (typeof e === 'string' ? e : e?.message) || d?.message || d?.detail || '';
-        } catch { /* body was not JSON */ }
-        if (!detail) detail = raw.replace(/\s+/g, ' ').trim().slice(0, 200);
-      } catch { /* body unreadable */ }
-      const retryAfter = response.headers.get('retry-after');   // null unless the server exposes it to browsers
-      console.warn(`[KeyPool] ${url} -> HTTP 429: ${detail || '(empty body)'}${retryAfter ? ' | retry-after: ' + retryAfter : ''}`);
-      throw new Error('Rate limited (HTTP 429)' + (detail ? ': ' + detail : '') + (retryAfter ? ' | retry-after: ' + retryAfter : ''));
-    }
+    // Read the body for every failure so the decision below uses the real message and code.
+    const info = await readApiError(response);
+    const detail = describeApiError(response.status, info);
+    console.warn(`[KeyPool] ${url} -> ${detail}`);
 
-    // Try to parse error body
-    let errMsg = '';
-    try {
-      const rawBody = await response.clone().text();
-      try {
-        const errData = JSON.parse(rawBody);
-        const e = errData?.error;
-        errMsg = (typeof e === 'string' ? e : e?.message) || errData?.message || errData?.detail || '';
-      } catch { /* body was not JSON */ }
-      if (!errMsg) errMsg = rawBody.replace(/\s+/g, ' ').trim().slice(0, 200);
-    } catch { /* body unreadable */ }
-    console.warn(`[KeyPool] ${url} -> HTTP ${response.status}: ${errMsg || '(empty body)'}`);
-
-    if (isOutOfCreditsError(response.status, errMsg)) {
-      console.warn(`[KeyPool] Key rejected (HTTP ${response.status}). Rotating…`);
-      lastKeyErr = `HTTP ${response.status}${errMsg ? ': ' + errMsg : ''}`;
+    // Out of tokens, whatever the status (including 429 when the body says so): try the next key.
+    if (isOutOfCreditsError(response.status, info.message, info.code)) {
+      console.warn(`[KeyPool] Key index ${_activeKeyIndex} rejected (${detail}). Rotating…`);
+      lastKeyErr = detail;
       if (!rotateFn()) {
         throw new Error(`All API keys were rejected (last error: ${lastKeyErr}).`);
       }
-      // Continue loop with new key
-      continue;
+      continue;   // retry with the new key
     }
 
-    // Non-token error — surface it
-    throw new Error(`HTTP ${response.status}${errMsg ? ': ' + errMsg : ''}`);
+    // 429 without an out-of-tokens message = rate limit or a busy server. Another key will not help
+    // and each retry is a new request, so fail fast with the real message.
+    if (response.status === 429) {
+      const retryAfter = response.headers.get('retry-after');   // null unless the server exposes it to browsers
+      throw new Error(`Rate limited (${detail})${retryAfter ? ' | retry-after: ' + retryAfter : ''}`);
+    }
+
+    // Any other error is not a key problem — surface it
+    throw new Error(detail);
   }
 
   throw new Error('All API keys failed. Please check your keys and token balance.');
@@ -2644,8 +2638,18 @@ async function streamCompletion({ messages, targetBubble, hasImage = false, onDo
         break;
       }
 
-      // 429 = rate-limited, not dead. Rotate to the next key (wrapping
-      // around past the last one) and keep trying within the deadline.
+      const info = await readApiError(r);
+      const detail = describeApiError(r.status, info);
+      console.warn(`[KeyPool/Stream] ${detail}`);
+
+      // Out of tokens, whatever the status (including 429 when the body says so): next key, each tried once.
+      if (isOutOfCreditsError(r.status, info.message, info.code)) {
+        console.warn(`[KeyPool/Stream] Key index ${_activeKeyIndex} out of tokens. Rotating…`);
+        if (!rotateKey()) throw new Error('All API keys are out of tokens. Please add more tokens or additional keys.');
+        continue;
+      }
+
+      // Any other 429 is a rate limit: rotate key-to-key (wrapping) with a short delay until the deadline.
       if (r.status === 429) {
         if (rateLimitDeadline === null) rateLimitDeadline = Date.now() + RATE_LIMIT_DEADLINE_MS;
         if (Date.now() >= rateLimitDeadline) {
@@ -2653,23 +2657,13 @@ async function streamCompletion({ messages, targetBubble, hasImage = false, onDo
         }
         _activeKeyIndex = (_activeKeyIndex + 1) % REWIND_API_KEYS.length;
         console.warn(`[KeyPool/Stream] 429 rate-limited. Rotated to key index ${_activeKeyIndex}…`);
-        await sleep(750);   // was a zero-delay loop: dozens of requests per second for the whole deadline
-        continue;
-      }
-
-      let errData = {};
-      try { errData = await r.clone().json(); } catch { /* ignore */ }
-      const errMsg = errData?.error?.message || '';
-
-      if (isOutOfCreditsError(r.status, errMsg)) {
-        console.warn(`[KeyPool/Stream] Key index ${_activeKeyIndex} out of tokens. Rotating…`);
-        if (!rotateKey()) throw new Error('All API keys are out of tokens. Please add more tokens or additional keys.');
+        await sleep(750);
         continue;
       }
 
       // A plain HTTP error (400, 404, 5xx...) is not a dead key. Retrying it on every key
       // only repeats the same failing request, so it is rethrown instead of rotated.
-      const httpErr = new Error(`HTTP ${r.status}${errMsg ? ': ' + errMsg : ''}`);
+      const httpErr = new Error(detail);
       httpErr.isHttpError = true;
       throw httpErr;
     } catch (networkErr) {
@@ -2910,8 +2904,17 @@ async function retryLastMessage(row, bubble) {
       });
       if (r.ok) { response = r; break; }
 
-      // 429 = rate-limited, not dead. Rotate to the next key (wrapping
-      // past the last one) and keep trying within the deadline.
+      const info = await readApiError(r);
+      const detail = describeApiError(r.status, info);
+      console.warn(`[KeyPool/Retry] ${detail}`);
+
+      // Out of tokens, whatever the status: next key, each tried once.
+      if (isOutOfCreditsError(r.status, info.message, info.code)) {
+        if (!rotateKey()) throw new Error('All API keys are out of tokens.');
+        continue;
+      }
+
+      // Any other 429 is a rate limit: rotate key-to-key (wrapping) with a short delay until the deadline.
       if (r.status === 429) {
         if (rateLimitDeadline === null) rateLimitDeadline = Date.now() + RATE_LIMIT_DEADLINE_MS;
         if (Date.now() >= rateLimitDeadline) {
@@ -2922,14 +2925,7 @@ async function retryLastMessage(row, bubble) {
         continue;
       }
 
-      let errData = {};
-      try { errData = await r.clone().json(); } catch {}
-      const errMsg = errData?.error?.message || '';
-      if (isOutOfCreditsError(r.status, errMsg)) {
-        if (!rotateKey()) throw new Error('All API keys are out of tokens.');
-        continue;
-      }
-      throw new Error(errMsg || `API error ${r.status}`);
+      throw new Error(detail);
     }
     if (!response) throw new Error('Failed to connect to API.');
 
