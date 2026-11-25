@@ -135,13 +135,21 @@ async function fetchWithKeyFallback(url, buildOptions, pool = REWIND_API_KEYS, g
     }
 
     // Try to parse error body
-    let errData = {};
-    try { errData = await response.clone().json(); } catch { /* ignore */ }
-    const errMsg = errData?.error?.message || '';
+    let errMsg = '';
+    try {
+      const rawBody = await response.clone().text();
+      try {
+        const errData = JSON.parse(rawBody);
+        const e = errData?.error;
+        errMsg = (typeof e === 'string' ? e : e?.message) || errData?.message || errData?.detail || '';
+      } catch { /* body was not JSON */ }
+      if (!errMsg) errMsg = rawBody.replace(/\s+/g, ' ').trim().slice(0, 200);
+    } catch { /* body unreadable */ }
+    console.warn(`[KeyPool] ${url} -> HTTP ${response.status}: ${errMsg || '(empty body)'}`);
 
     if (isOutOfCreditsError(response.status, errMsg)) {
       console.warn(`[KeyPool] Key rejected (HTTP ${response.status}). Rotating…`);
-      lastKeyErr = errMsg || `HTTP ${response.status}`;
+      lastKeyErr = `HTTP ${response.status}${errMsg ? ': ' + errMsg : ''}`;
       if (!rotateFn()) {
         throw new Error(`All API keys were rejected (last error: ${lastKeyErr}).`);
       }
@@ -150,7 +158,7 @@ async function fetchWithKeyFallback(url, buildOptions, pool = REWIND_API_KEYS, g
     }
 
     // Non-token error — surface it
-    throw new Error(errMsg || `API error ${response.status}`);
+    throw new Error(`HTTP ${response.status}${errMsg ? ': ' + errMsg : ''}`);
   }
 
   throw new Error('All API keys failed. Please check your keys and token balance.');
@@ -1256,15 +1264,21 @@ const ImageGen = {
       })
     );
 
+    const rawText = await response.text();
     let data;
-    try { data = await response.json(); }
-    catch { throw new Error('Image endpoint returned a non-JSON response.'); }
+    try { data = JSON.parse(rawText); }
+    catch { throw new Error('Image endpoint returned a non-JSON response: ' + rawText.slice(0, 160)); }
     const entry = data?.data?.[0];
-    if (!entry) throw new Error(data?.error?.message || 'No image returned.');
+    if (!entry) {
+      console.error('[ImageGen] Unexpected response shape:', data);
+      const e = data?.error;
+      throw new Error((typeof e === 'string' ? e : e?.message) || ('No image in response: ' + rawText.slice(0, 160)));
+    }
 
     if (entry.b64_json) return `data:image/png;base64,${entry.b64_json}`;
     if (entry.url) return entry.url;
-    throw new Error('No image URL returned.');
+    console.error('[ImageGen] Entry had neither b64_json nor url:', entry);
+    throw new Error('Response entry has no b64_json or url (keys: ' + Object.keys(entry).join(', ') + ').');
   },
 
   _makeLimitCard(resetsAt) {
@@ -2185,31 +2199,75 @@ function cleanForTTS(text) {
     .replace(/\n+/g, ' ').trim();
 }
 
+/** Splits text into chunks of at most `max` characters, preferring sentence ends.
+    Chrome can silently stop one long utterance partway through, so we queue short ones. */
+function splitForSpeech(text, max = 200) {
+  const sentences = String(text).match(/[^.!?]+[.!?]*\s*/g) || [String(text)];
+  const chunks = [];
+  let cur = '';
+  for (const sentence of sentences) {
+    if ((cur + sentence).length <= max) { cur += sentence; continue; }
+    if (cur.trim()) chunks.push(cur.trim());
+    let rest = sentence;
+    while (rest.length > max) {
+      let cut = rest.lastIndexOf(' ', max);
+      if (cut < 1) cut = max;
+      chunks.push(rest.slice(0, cut).trim());
+      rest = rest.slice(cut);
+    }
+    cur = rest;
+  }
+  if (cur.trim()) chunks.push(cur.trim());
+  return chunks.filter(Boolean);
+}
+
 function speakWithBrowser(clean, btn, id) {
   if (!('speechSynthesis' in window)) { showToast('TTS not supported in this browser.'); ttsReset(); return; }
-  const utterance = new SpeechSynthesisUtterance(clean);
-  utterance.rate = 0.95; utterance.pitch = 0.85; utterance.lang = 'en-US';
+  const chunks = splitForSpeech(clean);
+  if (!chunks.length) { ttsReset(); return; }
+
+  let voice = null;
   const pickVoice = () => {
     const voices = window.speechSynthesis.getVoices();
     const preferred = ['Google UK English Male','Microsoft Guy Online (Natural) - English (United States)','Microsoft Davis Online (Natural) - English (United States)','Microsoft Mark Online (Natural) - English (United States)','Microsoft Ryan Online (Natural) - English (United Kingdom)','Daniel','Fred','Alex','Tom','en-us-x-iom-local'];
-    for (const name of preferred) { const match = voices.find(v => v.name === name); if (match) { utterance.voice = match; return; } }
+    for (const name of preferred) { const match = voices.find(v => v.name === name); if (match) { voice = match; return; } }
     const maleFallback = voices.find(v => v.lang.startsWith('en') && /male|man|guy|david|mark|james|daniel|fred|alex|tom|george|ryan|davis/i.test(v.name));
-    if (maleFallback) { utterance.voice = maleFallback; return; }
+    if (maleFallback) { voice = maleFallback; return; }
     const anyEnglish = voices.find(v => v.lang.startsWith('en'));
-    if (anyEnglish) utterance.voice = anyEnglish;
+    if (anyEnglish) voice = anyEnglish;
   };
   pickVoice();
   if (window.speechSynthesis.getVoices().length === 0) window.speechSynthesis.onvoiceschanged = pickVoice;
-  utterance.onend = utterance.onerror = () => { if (id === ttsRequestId) ttsReset(); };
-  // Chrome can drop an utterance queued in the same tick as cancel(), so defer the speak() slightly.
-  setTimeout(() => { if (id === ttsRequestId) window.speechSynthesis.speak(utterance); }, 60);
+
+  let index = 0;
+  const speakNext = () => {
+    if (id !== ttsRequestId) return;                       // stopped or replaced
+    if (index >= chunks.length) { ttsReset(); return; }
+    const utterance = new SpeechSynthesisUtterance(chunks[index++]);
+    utterance.rate = 0.95; utterance.pitch = 0.85; utterance.lang = 'en-US';
+    if (voice) utterance.voice = voice;
+    utterance.onend = speakNext;
+    utterance.onerror = (ev) => {
+      if (id !== ttsRequestId) return;
+      // cancel() reports 'canceled' / 'interrupted'; those are our own stops, not failures.
+      if (ev.error !== 'canceled' && ev.error !== 'interrupted') {
+        console.warn('[TTS] Browser voice error:', ev.error);
+        showToast('Browser voice failed: ' + (ev.error || 'unknown error'));
+      }
+      ttsReset();
+    };
+    window.speechSynthesis.speak(utterance);
+  };
+  // Chrome can drop an utterance queued in the same tick as cancel(), so defer the first speak() slightly.
+  setTimeout(speakNext, 60);
 }
 
-function ttsErrorText(data, status) {
+function ttsErrorText(data, status, raw = '') {
   const e = data?.error ?? data?.message ?? data?.detail;
-  if (typeof e === 'string' && e) return e;
-  if (e && typeof e.message === 'string') return e.message;
-  return `HTTP ${status}`;
+  if (typeof e === 'string' && e) return `HTTP ${status}: ${e}`;
+  if (e && typeof e.message === 'string') return `HTTP ${status}: ${e.message}`;
+  const snippet = String(raw).replace(/\s+/g, ' ').trim().slice(0, 120);
+  return snippet ? `HTTP ${status}: ${snippet}` : `HTTP ${status}`;
 }
 
 async function speakText(text, btn) {
@@ -2236,20 +2294,25 @@ async function speakText(text, btn) {
       headers: { 'x-api-key': FREETTS_API_KEY, 'Content-Type': 'application/json' },
       body: JSON.stringify({ text: clean, voice: FREETTS_VOICE, output_format: FREETTS_FORMAT }),
     });
+    const raw = await r.text();
     let data = null;
-    try { data = await r.json(); } catch { /* non-JSON body */ }
+    try { data = JSON.parse(raw); } catch { /* non-JSON body */ }
     if (id !== ttsRequestId) return;                       // stopped or replaced while fetching
-    if (!r.ok) throw new Error(ttsErrorText(data, r.status));
-    if (typeof data?.audio_url !== 'string' || !data.audio_url) throw new Error('response had no audio_url');
+    if (!r.ok) throw new Error(ttsErrorText(data, r.status, raw));
+    if (typeof data?.audio_url !== 'string' || !data.audio_url) {
+      console.error('[TTS] FreeTTS response had no audio_url:', raw.slice(0, 300));
+      throw new Error('response had no audio_url (keys: ' + Object.keys(data || {}).join(', ') + ')');
+    }
 
     const audio = new Audio(data.audio_url);
     ttsAudio = audio;
     audio.onended = () => { if (id === ttsRequestId) ttsReset(); };
-    audio.onerror = () => fallback('audio could not be loaded');
+    audio.onerror = () => { console.error('[TTS] Audio element error for', data.audio_url); fallback('audio could not be loaded'); };
     await audio.play();
   } catch (err) {
     if (id !== ttsRequestId) return;                       // pause() from a stop aborts play(): not an error
-    fallback(err?.message || 'request failed');
+    console.error('[TTS] FreeTTS request failed:', err);
+    fallback(err instanceof TypeError ? 'network error or CORS blocked (see console)' : (err?.message || 'request failed'));
   }
 }
 
