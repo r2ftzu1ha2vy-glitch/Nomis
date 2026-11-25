@@ -124,13 +124,18 @@ function describeApiError(status, info) {
     Looks at status, error message and error code, on any status including 429.
     Known limit: the exact wording Rewind uses for "not enough tokens" is not confirmed, so this matches
     several likely phrasings. Paste a real out-of-tokens response and the patterns can be tightened. */
+/** True when the model itself is gated behind a plan tier (e.g. code REQUIRES_PAID_PLAN). */
+function isPlanGatedError(errorMessage = '', errorCode = '') {
+  return /requires_[a-z_]*(plan|tier)|upgrade your plan/.test(`${errorCode} ${errorMessage}`.toLowerCase());
+}
+
 function isOutOfCreditsError(status, errorMessage = '', errorCode = '') {
   const text = `${errorCode} ${errorMessage}`.toLowerCase();
 
-  // The model is gated behind a plan tier (e.g. REQUIRES_PAID_PLAN). Keys on the same tier all fail the same
-  // way, so rotating only hides the real cause behind a false "out of tokens". Surface it instead.
+  // A plan-gated model fails the same way on every key of that tier, so rotating only hides the real cause
+  // behind a false "out of tokens". Callers switch to the free model instead (see streamCompletion).
   // If your keys sit on different tiers, remove this line so a higher-tier key can be tried.
-  if (/requires_[a-z_]*(plan|tier)|upgrade your plan/.test(text)) return false;
+  if (isPlanGatedError(errorMessage, errorCode)) return false;
 
   if (status === 401 || status === 402 || status === 403) return true;
 
@@ -285,6 +290,15 @@ const MODEL_IMAGE_GEN = 'black-forest-labs/flux.2-klein-4b';
 // (unverified), so generateChatTitle falls back to a trimmed copy of the first message if the call fails.
 const MODEL_TITLE = 'google/gemma-4-26b-a4b-it:free';
 
+// Free fallback for chat. When a chat model answers REQUIRES_PAID_PLAN, requests switch to this one.
+// Source: same Rewind list: type chat, tier ANONYMOUS, isModerated false, prices 0, input image+text+video
+// (so it also covers image-attached chats). It is a much smaller model than gpt-4o or claude-sonnet-5,
+// so expect weaker answers and less reliable [GENERATE_IMAGE: ...] token output (not yet tested in this app).
+const MODEL_FREE_FALLBACK = MODEL_TITLE;
+// Models that answered "needs a higher plan" in this page session. They are skipped straight to the
+// fallback so every message does not pay for a failing first request. Cleared on page reload.
+const _planGatedModels = new Set();
+
 // VISION (chat with an attached image) must be a multimodal CHAT model. The original code
 // pointed this at the image-generation model, which cannot answer chat completions.
 // UNVERIFIED slugs: taken from the "Switching to Gemini 2.5 ..." toast in sendMessage().
@@ -302,11 +316,14 @@ const VERSION_MODEL_MAP = {
 const MODEL_FALLBACK_1_2_TO_1_4 = 'openai/gpt-4o'; // used only if Claude Sonnet 5 slug 404s on Rewind
 
 function getActiveModel(hasImage = false) {
+  let picked;
   if (hasImage) {
     const isCreator = state?.user?.email === OWNER_EMAIL;
-    return isCreator ? MODEL_VISION_CREATOR : MODEL_VISION;
+    picked = isCreator ? MODEL_VISION_CREATOR : MODEL_VISION;
+  } else {
+    picked = VERSION_MODEL_MAP[state.nomisVersion] || VERSION_MODEL_MAP['1.4'];
   }
-  return VERSION_MODEL_MAP[state.nomisVersion] || VERSION_MODEL_MAP['1.4'];
+  return _planGatedModels.has(picked) ? MODEL_FREE_FALLBACK : picked;
 }
 
 const APP_URL = window.location.href;
@@ -2611,7 +2628,7 @@ async function streamCompletion({ messages, targetBubble, hasImage = false, onDo
   resetKeyPool();
   messages = trimMessagesForApi(messages);
 
-  const model = getActiveModel(hasImage);
+  let model = getActiveModel(hasImage);
   const maxTokens = state.isDegraded ? 300 : 1000;
   const temperature = state.isDegraded ? 0.5 : (state.mode === 'sidekick' ? 0.2 : 0.8);
 
@@ -2650,6 +2667,15 @@ async function streamCompletion({ messages, targetBubble, hasImage = false, onDo
       const info = await readApiError(r);
       const detail = describeApiError(r.status, info);
       console.warn(`[KeyPool/Stream] ${detail}`);
+
+      // Model needs a higher plan: remember it, switch to the free model and retry once on the same key.
+      if (isPlanGatedError(info.message, info.code) && model !== MODEL_FREE_FALLBACK) {
+        _planGatedModels.add(model);
+        console.warn(`[Model] ${model} needs a higher plan. Switching to ${MODEL_FREE_FALLBACK}.`);
+        showToast('That model needs a paid plan — using a free model instead');
+        model = MODEL_FREE_FALLBACK;
+        continue;
+      }
 
       // Out of tokens, whatever the status (including 429 when the body says so): next key, each tried once.
       if (isOutOfCreditsError(r.status, info.message, info.code)) {
@@ -2877,7 +2903,7 @@ async function retryLastMessage(row, bubble) {
   state.messages = state.messages.slice(0, lastAiIdx);
   bubble.innerHTML = ''; state.isStreaming = true; sendBtn.disabled = true;
   const barRamp = startStreamBar();
-  const model = getActiveModel();
+  let model = getActiveModel();
   // Don't inherit rotation state from a previous call - start from key 0.
   resetKeyPool();
 
@@ -2916,6 +2942,15 @@ async function retryLastMessage(row, bubble) {
       const info = await readApiError(r);
       const detail = describeApiError(r.status, info);
       console.warn(`[KeyPool/Retry] ${detail}`);
+
+      // Model needs a higher plan: remember it, switch to the free model and retry once on the same key.
+      if (isPlanGatedError(info.message, info.code) && model !== MODEL_FREE_FALLBACK) {
+        _planGatedModels.add(model);
+        console.warn(`[Model] ${model} needs a higher plan. Switching to ${MODEL_FREE_FALLBACK}.`);
+        showToast('That model needs a paid plan — using a free model instead');
+        model = MODEL_FREE_FALLBACK;
+        continue;
+      }
 
       // Out of tokens, whatever the status: next key, each tried once.
       if (isOutOfCreditsError(r.status, info.message, info.code)) {
