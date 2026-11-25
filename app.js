@@ -107,6 +107,10 @@ async function readApiError(response) {
     else { message = e?.message || ''; code = e?.code ? String(e.code) : ''; }
     message = message || d?.message || d?.detail || '';
     code = code || (d?.code ? String(d.code) : '');
+    const det = d?.error?.details;
+    if (det?.requiredTier) {
+      message += ` (model ${det.model || '?'} needs the ${det.requiredTier} plan; this key is ${det.userTier || '?'})`;
+    }
   } catch { /* body was not JSON */ }
   if (!message) message = raw.replace(/\s+/g, ' ').trim().slice(0, 200);
   return { message, code };
@@ -121,9 +125,14 @@ function describeApiError(status, info) {
     Known limit: the exact wording Rewind uses for "not enough tokens" is not confirmed, so this matches
     several likely phrasings. Paste a real out-of-tokens response and the patterns can be tightened. */
 function isOutOfCreditsError(status, errorMessage = '', errorCode = '') {
-  if (status === 401 || status === 402 || status === 403) return true;
-
   const text = `${errorCode} ${errorMessage}`.toLowerCase();
+
+  // The model is gated behind a plan tier (e.g. REQUIRES_PAID_PLAN). Keys on the same tier all fail the same
+  // way, so rotating only hides the real cause behind a false "out of tokens". Surface it instead.
+  // If your keys sit on different tiers, remove this line so a higher-tier key can be tried.
+  if (/requires_[a-z_]*(plan|tier)|upgrade your plan/.test(text)) return false;
+
+  if (status === 401 || status === 402 || status === 403) return true;
 
   // Transient or per-time-window limits are not a dead key: rotating would not help.
   if (/service_busy|busy|rate.?limit|too many requests|per (minute|second|hour)|\b[rt]pm\b/.test(text)) return false;
