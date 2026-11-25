@@ -35,6 +35,25 @@ const REWIND_BASE_URL = 'https://api.rewind.ai/v1/chat/completions';
 // tokens instead of 20. This was the primary driver of daily token
 // burn, far larger than any single image or chat call.
 const MAX_HISTORY_MESSAGES = 10;
+
+// Old assistant replies are the bulk of the history. Replies older than the last
+// HISTORY_KEEP_FULL messages are clipped to HISTORY_CLIP_CHARS in what is SENT only;
+// state.messages, storage and the visible chat keep the full text.
+const HISTORY_KEEP_FULL = 3;
+const HISTORY_CLIP_CHARS = 1200;
+
+/** Pure: returns a copy of an API message list with older long assistant replies clipped.
+    Index 0 and 1 are the system prompt and intro and are never touched. */
+function trimMessagesForApi(messages) {
+  const keepFrom = messages.length - HISTORY_KEEP_FULL;
+  return messages.map((m, i) => {
+    if (i < 2 || i >= keepFrom || m.role !== 'assistant' || typeof m.content !== 'string') return m;
+    if (m.content.length <= HISTORY_CLIP_CHARS) return m;
+    return { ...m, content: m.content.slice(0, HISTORY_CLIP_CHARS) + ' […]' };
+  });
+}
+
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 const REWIND_IMAGE_URL = 'https://api.rewind.ai/v1/images/generations';
 
 const DAILY_IMAGE_LIMIT = 3;
@@ -131,7 +150,20 @@ async function fetchWithKeyFallback(url, buildOptions, pool = REWIND_API_KEYS, g
     // certainly fails again immediately. Fail fast instead of spending
     // extra requests on a near-guaranteed repeat 429.
     if (response.status === 429) {
-      throw new Error('Rate limited by the API. Please wait a moment and try again.');
+      // Read the body so the real reason (rate limit vs. exhausted quota) is visible instead of guessed.
+      let detail = '';
+      try {
+        const raw = await response.clone().text();
+        try {
+          const d = JSON.parse(raw);
+          const e = d?.error;
+          detail = (typeof e === 'string' ? e : e?.message) || d?.message || d?.detail || '';
+        } catch { /* body was not JSON */ }
+        if (!detail) detail = raw.replace(/\s+/g, ' ').trim().slice(0, 200);
+      } catch { /* body unreadable */ }
+      const retryAfter = response.headers.get('retry-after');   // null unless the server exposes it to browsers
+      console.warn(`[KeyPool] ${url} -> HTTP 429: ${detail || '(empty body)'}${retryAfter ? ' | retry-after: ' + retryAfter : ''}`);
+      throw new Error('Rate limited (HTTP 429)' + (detail ? ': ' + detail : '') + (retryAfter ? ' | retry-after: ' + retryAfter : ''));
     }
 
     // Try to parse error body
@@ -2499,7 +2531,7 @@ async function generateChatTitle(chatId, firstMessage) {
           model: getActiveModel(),
           max_tokens: 16,
           temperature: 0.4,
-          messages: [{ role: 'user', content: `Generate a short, punchy title (3–5 words max, no quotes, no punctuation at the end) that captures the topic of this message:\n\n"${firstMessage}"` }],
+          messages: [{ role: 'user', content: `Generate a short, punchy title (3–5 words max, no quotes, no punctuation at the end) that captures the topic of this message:\n\n"${String(firstMessage).slice(0, 200)}"` }],
         }),
       })
     );
@@ -2560,6 +2592,7 @@ async function streamCompletion({ messages, targetBubble, hasImage = false, onDo
   // Same reasoning as fetchWithKeyFallback: don't inherit rotation state
   // from a previous unrelated call. Start fresh from key 0 every time.
   resetKeyPool();
+  messages = trimMessagesForApi(messages);
 
   const model = getActiveModel(hasImage);
   const maxTokens = state.isDegraded ? 300 : 1000;
@@ -2606,6 +2639,7 @@ async function streamCompletion({ messages, targetBubble, hasImage = false, onDo
         }
         _activeKeyIndex = (_activeKeyIndex + 1) % REWIND_API_KEYS.length;
         console.warn(`[KeyPool/Stream] 429 rate-limited. Rotated to key index ${_activeKeyIndex}…`);
+        await sleep(750);   // was a zero-delay loop: dozens of requests per second for the whole deadline
         continue;
       }
 
@@ -2619,8 +2653,13 @@ async function streamCompletion({ messages, targetBubble, hasImage = false, onDo
         continue;
       }
 
-      throw new Error(errMsg || `API error ${r.status}`);
+      // A plain HTTP error (400, 404, 5xx...) is not a dead key. Retrying it on every key
+      // only repeats the same failing request, so it is rethrown instead of rotated.
+      const httpErr = new Error(`HTTP ${r.status}${errMsg ? ': ' + errMsg : ''}`);
+      httpErr.isHttpError = true;
+      throw httpErr;
     } catch (networkErr) {
+      if (networkErr.isHttpError) throw networkErr;
       if (networkErr.message.includes('API keys')) throw networkErr;
       if (networkErr.message.includes('Server Currently Unavailable')) throw networkErr;
       lastErr = networkErr;
@@ -2846,9 +2885,10 @@ async function retryLastMessage(row, bubble) {
     let response = null;
     let rateLimitDeadline = null;
     const RATE_LIMIT_DEADLINE_MS = 15000;
+    const trimmedMessages = trimMessagesForApi(messages);
     for (let attempt = 0; ; attempt++) {
       const key = getActiveKey();
-      const buildBody = () => JSON.stringify({ model, messages, stream: true, max_tokens: state.isDegraded ? 300 : 1000, temperature: state.isDegraded ? 0.6 : (state.mode === 'sidekick' ? 0.5 : 1.0) });
+      const buildBody = () => JSON.stringify({ model, messages: trimmedMessages, stream: true, max_tokens: state.isDegraded ? 300 : 1000, temperature: state.isDegraded ? 0.6 : (state.mode === 'sidekick' ? 0.5 : 1.0) });
       let r = await fetch(REWIND_BASE_URL, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
@@ -2864,6 +2904,7 @@ async function retryLastMessage(row, bubble) {
           throw new Error('Server Currently Unavailable');
         }
         _activeKeyIndex = (_activeKeyIndex + 1) % REWIND_API_KEYS.length;
+        await sleep(750);
         continue;
       }
 
