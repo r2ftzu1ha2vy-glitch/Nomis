@@ -270,8 +270,17 @@ const ImageLimit = {
    Image gen → FLUX.2 Klein 4B (all versions)
 ════════════════════════════════════════ */
 // Image GENERATION model — used only by ImageGen._generateViaAPI against REWIND_IMAGE_URL.
-// UNVERIFIED: slug carried over from the original file; confirm it against your Rewind model list.
-const MODEL_IMAGE_GEN = 'openai/gpt-image-2';
+// Source: the Rewind /v1/models list you pasted. black-forest-labs/flux.2-klein-4b is listed as
+// type image, tier ANONYMOUS, isModerated false, generationPriceTokens 2000, completion price 684.
+// Not yet run in this app: the request size and the images/generations route are still untested with it.
+// Untested alternative with a lower listed completion price (383) but tier PAID:
+//   'black-forest-labs/flux-3-image-klein'
+const MODEL_IMAGE_GEN = 'black-forest-labs/flux.2-klein-4b';
+
+// Chat-title model. Source: same list: google/gemma-4-26b-a4b-it:free is type chat, tier ANONYMOUS,
+// isModerated false, prompt and completion price 0. Free models may be rate-limited harder than paid ones
+// (unverified), so generateChatTitle falls back to a trimmed copy of the first message if the call fails.
+const MODEL_TITLE = 'google/gemma-4-26b-a4b-it:free';
 
 // VISION (chat with an attached image) must be a multimodal CHAT model. The original code
 // pointed this at the image-generation model, which cannot answer chat completions.
@@ -2528,7 +2537,7 @@ async function generateChatTitle(chatId, firstMessage) {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          model: getActiveModel(),
+          model: MODEL_TITLE,
           max_tokens: 16,
           temperature: 0.4,
           messages: [{ role: 'user', content: `Generate a short, punchy title (3–5 words max, no quotes, no punctuation at the end) that captures the topic of this message:\n\n"${String(firstMessage).slice(0, 200)}"` }],
@@ -2538,7 +2547,12 @@ async function generateChatTitle(chatId, firstMessage) {
     const data = await response.json();
     const title = (data.choices?.[0]?.message?.content || '').trim().replace(/^["']|["']$/g, '').trim();
     if (title) { Store.updateChat(chatId, { title }); renderHistory(); }
-  } catch { /* silent */ }
+    else throw new Error('empty title');
+  } catch (err) {
+    console.warn('[Title] Generation failed, using the first message instead:', err?.message || err);
+    const fallback = String(firstMessage).replace(/\s+/g, ' ').trim().slice(0, 40);
+    if (fallback) { Store.updateChat(chatId, { title: fallback }); renderHistory(); }
+  }
 }
 
 /* ════════════════════════════════════════
