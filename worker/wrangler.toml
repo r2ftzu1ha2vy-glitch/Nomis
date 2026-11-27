@@ -1,0 +1,13 @@
+name = "nomis-tts-proxy"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+[vars]
+# REQUIRED: your GitHub Pages ORIGIN (scheme + host only, no path). Comma-separate several.
+ALLOWED_ORIGINS = "https://YOUR-GITHUB-USERNAME.github.io"
+DEFAULT_VOICE = "en-US-EricNeural"
+# MAX_TEXT_CHARS = "5000"
+# RATE_FIELD = "rate"
+# PITCH_FIELD = "pitch"
+
+# The API key is NOT here. Set it with:  npx wrangler secret put FREETTS_API_KEY
