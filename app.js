@@ -315,7 +315,14 @@ const VERSION_MODEL_MAP = {
 
 const MODEL_FALLBACK_1_2_TO_1_4 = 'openai/gpt-4o'; // used only if Claude Sonnet 5 slug 404s on Rewind
 
+// When true, every chat goes straight to MODEL_FREE_FALLBACK (the only model confirmed as tier ANONYMOUS
+// in your Rewind list), so no request is wasted on a paid-plan model that answers REQUIRES_PAID_PLAN.
+// Set to false to restore the per-version models in VERSION_MODEL_MAP / MODEL_VISION*.
+// Other free models are not listed here because their slugs are not in anything you have given me.
+const FREE_ONLY_MODE = true;
+
 function getActiveModel(hasImage = false) {
+  if (FREE_ONLY_MODE) return MODEL_FREE_FALLBACK;
   let picked;
   if (hasImage) {
     const isCreator = state?.user?.email === OWNER_EMAIL;
@@ -2829,7 +2836,10 @@ async function sendMessage() {
   if (isFirst) {
     Store.addChat({ id: state.activeChatId, title: '…', mode: state.mode, persona: state.activePersona, nomisVersion: state.nomisVersion, messages: state.messages, createdAt: Date.now() });
     renderHistory();
-    generateChatTitle(state.activeChatId, text || 'Image analysis');
+    // The title call uses the same free model as the chat. Firing both at once triggers the provider's
+    // UPSTREAM_RATE_LIMITED 429 (retry-after 10), so the title waits until the reply is under way.
+    const titleChatId = state.activeChatId;
+    setTimeout(() => generateChatTitle(titleChatId, text || 'Image analysis'), 12000);
   }
 
   const thinkingRow = thinkingTpl.content.cloneNode(true).querySelector('.thinking-row');
