@@ -1,424 +1,155 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Nomis — AI by NoteShelf</title>
-  <link rel="icon" type="image/png" href="https://iili.io/qIqJ2F2.png">
-  <link rel="shortcut icon" href="https://iili.io/qIqJ2F2.png">
-  <link rel="apple-touch-icon" href="https://iili.io/qIqJ2F2.png">
-  <link rel="manifest" href="manifest.json">
-  <meta name="theme-color" content="#07060A">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="Nomis">
-  <link rel="stylesheet" href="style.css" />
-  <link href="https://fonts.googleapis.com/css2?family=Cinzel+Decorative:wght@400;700;900&family=Cinzel:wght@400;600;900&family=EB+Garamond:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
-</head>
-<body>
+/**
+ * Nomis FreeTTS proxy — Cloudflare Worker.
+ *
+ * Browser  --POST JSON-->  this Worker  --POST + x-api-key-->  https://freetts.org/api/v1/tts
+ * The Worker answers the CORS preflight itself, keeps the key server-side, and returns audio bytes.
+ *
+ * Secrets / vars (see ../DEPLOY.md):
+ *   FREETTS_API_KEY   secret, required
+ *   ALLOWED_ORIGINS   var, required: comma-separated exact origins, e.g. https://yourname.github.io
+ *   DEFAULT_VOICE     var, optional, default en-US-EricNeural
+ *   MAX_TEXT_CHARS    var, optional, default 5000 (this proxy's own cap, NOT a FreeTTS limit)
+ *   RATE_FIELD        var, optional, default "rate"   — UNVERIFIED upstream field name
+ *   PITCH_FIELD       var, optional, default "pitch"  — UNVERIFIED upstream field name
+ */
 
-<!-- ── AUTH SCREEN ── -->
-<div id="auth-screen">
-  <div id="auth-bg-grid"></div>
-  <div id="auth-orb1"></div>
-  <div id="auth-orb2"></div>
-  <div id="auth-container">
-    <div id="auth-logo-wrap">
-      <img src="https://iili.io/qIqJ2F2.png" alt="Nomis" id="auth-logo" />
-      <div id="auth-brand">
-        <span id="auth-brand-name">NOMIS</span>
-        <span id="auth-brand-sub">Intelligence by NoteShelf</span>
-      </div>
-    </div>
-    <div id="auth-tabs">
-      <button class="auth-tab active" data-tab="login">Sign In</button>
-      <button class="auth-tab" data-tab="signup">Create Account</button>
-    </div>
-    <div id="tab-login" class="auth-form active">
-      <div class="auth-field">
-        <label class="auth-label">Email</label>
-        <input type="email" id="login-email" placeholder="you@example.com" autocomplete="email" />
-      </div>
-      <div class="auth-field">
-        <label class="auth-label">Password</label>
-        <input type="password" id="login-password" placeholder="••••••••" autocomplete="current-password" />
-      </div>
-      <div id="login-error" class="auth-error"></div>
-      <button class="auth-submit" id="login-btn">
-        <span>Enter the Vault</span>
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-      </button>
-      <p class="auth-alt">New here? <a href="#" class="auth-link" data-switch="signup">Create an account</a></p>
-    </div>
-    <div id="tab-signup" class="auth-form">
-      <div class="auth-field">
-        <label class="auth-label">Display Name</label>
-        <input type="text" id="signup-name" placeholder="Your name" autocomplete="name" />
-      </div>
-      <div class="auth-field">
-        <label class="auth-label">Email</label>
-        <input type="email" id="signup-email" placeholder="you@example.com" autocomplete="email" />
-      </div>
-      <div class="auth-field">
-        <label class="auth-label">Password</label>
-        <input type="password" id="signup-password" placeholder="Min 6 characters" autocomplete="new-password" />
-      </div>
-      <div id="signup-error" class="auth-error"></div>
-      <button class="auth-submit" id="signup-btn">
-        <span>Begin Journey</span>
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-      </button>
-      <p class="auth-alt">Already a member? <a href="#" class="auth-link" data-switch="login">Sign in</a></p>
-    </div>
-  </div>
-</div>
+const UPSTREAM_URL = 'https://freetts.org/api/v1/tts';
+const FORMATS = { mp3: 'audio/mpeg', 'mp3-hd': 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg' };
+const VOICE_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{2,63}$/;
+const FALLBACK_DEFAULT_VOICE = 'en-US-EricNeural';
+const FALLBACK_MAX_CHARS = 5000;
+const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
 
-<!-- ── MAIN APP ── -->
-<div id="app" style="display:none;">
+/* ───────── pure helpers (checkable without Cloudflare) ───────── */
 
-  <aside id="sidebar">
-    <div id="sidebar-top">
-      <div id="sidebar-brand">
-        <img src="https://iili.io/qIqJ2F2.png" alt="Nomis" id="sidebar-logo" />
-        <div>
-          <div id="sidebar-name">NOMIS</div>
-          <div id="sidebar-tagline">Intelligence</div>
-        </div>
-      </div>
+export function parseAllowedOrigins(value) {
+  return String(value || '').split(',').map(s => s.trim().replace(/\/+$/, '')).filter(Boolean);
+}
 
-      <div id="mode-switcher">
-        <button class="mode-btn active" data-mode="nomis">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
-          Nomis
-        </button>
-        <button class="mode-btn" data-mode="sidekick">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
-          Sidekick
-        </button>
-        <button class="mode-btn" data-mode="persona">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-          Persona
-        </button>
-      </div>
+export function corsHeaders(origin, allowed) {
+  const h = { 'Vary': 'Origin' };
+  if (origin && allowed.includes(origin)) {
+    h['Access-Control-Allow-Origin'] = origin;
+    h['Access-Control-Allow-Methods'] = 'POST, OPTIONS';
+    h['Access-Control-Allow-Headers'] = 'Content-Type';
+    h['Access-Control-Max-Age'] = '86400';
+  }
+  return h;
+}
 
-      <button id="new-chat-btn">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
-        New Conversation
-      </button>
+/** Returns { ok:true, payload } or { ok:false, error }. Rate/pitch are forwarded only when finite numbers. */
+export function buildUpstreamPayload(body, env) {
+  if (!body || typeof body !== 'object') return { ok: false, error: 'body must be a JSON object' };
+  const maxChars = Number.parseInt(env.MAX_TEXT_CHARS, 10) || FALLBACK_MAX_CHARS;
 
-      <div id="history-label">Recent</div>
-      <div id="chat-history"></div>
+  const text = typeof body.text === 'string' ? body.text.trim() : '';
+  if (!text) return { ok: false, error: 'text is required' };
+  if (text.length > maxChars) return { ok: false, error: `text is longer than ${maxChars} characters` };
 
-      <!-- ★ Personas section -->
-      <div id="persona-section">
-        <div id="persona-section-header">
-          <span id="persona-label">Personas</span>
-          <button id="add-persona-btn" title="Create new persona">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
-          </button>
-        </div>
-        <div id="persona-list"></div>
-      </div>
-    </div>
+  const voice = body.voice == null || body.voice === ''
+    ? (env.DEFAULT_VOICE || FALLBACK_DEFAULT_VOICE)
+    : body.voice;
+  if (typeof voice !== 'string' || !VOICE_RE.test(voice)) return { ok: false, error: 'invalid voice id' };
 
-    <div id="sidebar-bottom">
-      <a id="noteshelf-btn" href="https://r2ftzu1ha2vy-glitch.github.io/NoteShelf/" target="_blank" rel="noopener noreferrer" title="Check Out Noteshelf">
-        <img src="https://iili.io/BxXxMLg.png" alt="Noteshelf" />
-        <span>Noteshelf</span>
-      </a>
+  const format = body.output_format == null ? 'mp3' : body.output_format;
+  if (typeof format !== 'string' || !Object.hasOwn(FORMATS, format)) {
+    return { ok: false, error: 'output_format must be one of: ' + Object.keys(FORMATS).join(', ') };
+  }
 
-      <div id="user-info" title="Edit profile">
-        <div id="user-avatar-sidebar">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-        </div>
-        <div id="user-details">
-          <div id="user-display-name">Guest</div>
-          <div id="user-display-email">—</div>
-        </div>
-        <button id="edit-profile-icon" title="Edit profile">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-        </button>
-      </div>
+  const payload = { text, voice, output_format: format };
 
-      <div id="sidebar-bottom-actions">
-        <button id="download-nomis-btn" title="Download Nomis app">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-        </button>
-        <button id="logout-btn" title="Sign out" style="flex:1;">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
-          Sign Out
-        </button>
-      </div>
-    </div>
-  </aside>
+  for (const [key, field] of [['rate', env.RATE_FIELD || 'rate'], ['pitch', env.PITCH_FIELD || 'pitch']]) {
+    const v = body[key];
+    if (v === undefined || v === null || v === '') continue;
+    if (typeof v !== 'number' || !Number.isFinite(v)) return { ok: false, error: `${key} must be a finite number` };
+    if (v < -100 || v > 100) return { ok: false, error: `${key} must be between -100 and 100` };
+    payload[field] = v;
+  }
+  return { ok: true, payload, format };
+}
 
-  <main id="chat-area">
-    <div id="stream-bar"><div id="stream-bar-fill"></div></div>
+/* ───────── handler ───────── */
 
-    <div id="chat-topbar">
-      <button id="sidebar-toggle">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
-      </button>
-      <div id="topbar-mode-badge">
-        <span id="topbar-mode-icon">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
-        </span>
-        <span id="topbar-mode-label">Nomis Mode</span>
-      </div>
-      <div id="topbar-model-tag">Nomis-1.4-Nexus · NoteShelf</div>
-    </div>
+function json(status, obj, extra) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...extra },
+  });
+}
 
-    <div id="messages-container">
-      <div id="welcome-screen">
-        <div id="welcome-logo-wrap">
-          <img src="https://iili.io/qIqJ2F2.png" alt="Nomis" id="welcome-logo" />
-        </div>
-        <h1 id="welcome-title">Good evening.</h1>
-        <p id="welcome-sub">I am <strong>Nomis</strong> — switch to <strong>Sidekick</strong> for a quick helper, or create a <strong>Persona</strong>.</p>
-        <div id="welcome-chips">
-          <button class="chip" data-prompt="What can you help me with today?">What can you do?</button>
-          <button class="chip" data-prompt="Write a short poem about artificial intelligence and gold.">Write a poem</button>
-          <button class="chip" data-prompt="Explain quantum computing in simple terms.">Explain quantum computing</button>
-          <button class="chip" data-prompt="Give me 5 productivity tips for deep work sessions.">Productivity tips</button>
-        </div>
-      </div>
-      <div id="messages-list"></div>
-      <div id="stream-status" class="stream-status">
-        <span class="stream-dot"></span> Generating response…
-      </div>
-    </div>
+export async function handleRequest(request, env, fetchImpl = fetch) {
+  const allowed = parseAllowedOrigins(env.ALLOWED_ORIGINS);
+  const origin = request.headers.get('Origin') || '';
+  const cors = corsHeaders(origin, allowed);
 
-    <div id="input-area">
-      <!-- ★ Image preview strip -->
-      <div id="image-preview-wrap" style="display:none;">
-        <img id="image-preview-img" src="" alt="Attached image" />
-        <button id="image-remove-btn" title="Remove image">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-        </button>
-      </div>
+  if (request.method === 'OPTIONS') {
+    // Preflight: allowed origin gets 204 with CORS headers; anything else gets 403 without them.
+    return cors['Access-Control-Allow-Origin']
+      ? new Response(null, { status: 204, headers: cors })
+      : new Response(null, { status: 403, headers: cors });
+  }
+  if (request.method !== 'POST') return json(405, { error: 'method not allowed' }, { ...cors, Allow: 'POST, OPTIONS' });
 
-      <div id="input-wrap">
-        <!-- ★ Image upload button -->
-        <button id="image-upload-btn" title="Attach image">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-        </button>
-        <input type="file" id="image-upload-input" accept="image/*" style="display:none;" />
+  // Browsers always send Origin on cross-origin POST; reject unknown ones so the key can't be burned by other sites.
+  if (!cors['Access-Control-Allow-Origin']) return json(403, { error: 'origin not allowed' }, cors);
+  if (!env.FREETTS_API_KEY) return json(500, { error: 'proxy is missing FREETTS_API_KEY' }, cors);
 
-        <textarea id="chat-input" placeholder="Message Nomis…" rows="1"></textarea>
+  let body;
+  try { body = await request.json(); } catch { return json(400, { error: 'invalid JSON body' }, cors); }
+  const built = buildUpstreamPayload(body, env);
+  if (!built.ok) return json(400, { error: built.error }, cors);
 
-        <!-- ★ Voice button -->
-        <button id="voice-btn" title="Voice input">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
-        </button>
+  let upstream;
+  try {
+    upstream = await fetchImpl(UPSTREAM_URL, {
+      method: 'POST',
+      headers: { 'x-api-key': env.FREETTS_API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify(built.payload),
+    });
+  } catch {
+    return json(502, { error: 'could not reach FreeTTS' }, cors);
+  }
 
-        <button id="send-btn" disabled>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M22 2L11 13"/><path d="M22 2L15 22 11 13 2 9l20-7z"/></svg>
-        </button>
-      </div>
-      <div id="input-footer">
-        <span id="input-mode-hint">
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg>
-          Nomis — General Intelligence
-        </span>
-        <span id="char-count"></span>
-      </div>
-      <!-- Share URL display -->
-      <div id="share-url-display" style="display:none;"></div>
-    </div>
-  </main>
-</div>
+  const upstreamType = upstream.headers.get('Content-Type') || '';
 
-<!-- ── ★ PERSONA MODAL ── -->
-<div id="persona-overlay">
-  <div id="persona-modal">
-    <div id="persona-modal-header">
-      <div id="persona-modal-title">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-        <span id="persona-modal-title-text">New Persona</span>
-      </div>
-      <button id="persona-modal-close">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-      </button>
-    </div>
-    <div id="persona-modal-body">
-      <div class="persona-field-row">
-        <div class="persona-field" style="flex:1;">
-          <label class="persona-label">Name <span class="persona-label-note">required</span></label>
-          <input type="text" id="persona-name-input" placeholder="e.g. Professor Oak" maxlength="30" />
-        </div>
-        <div class="persona-field" style="width:80px;">
-          <label class="persona-label">Emoji</label>
-          <input type="text" id="persona-emoji-input" placeholder="✦" maxlength="2" style="text-align:center;font-size:20px;" />
-        </div>
-      </div>
-      <div class="persona-field">
-        <label class="persona-label">Quick emoji</label>
-        <div id="persona-emoji-grid"></div>
-      </div>
-      <div class="persona-field">
-        <label class="persona-label">Description <span class="persona-label-note">optional</span></label>
-        <input type="text" id="persona-desc-input" placeholder="e.g. A wise Pokémon professor" maxlength="80" />
-      </div>
-      <div class="persona-field">
-        <label class="persona-label">System Prompt <span class="persona-label-note">required — defines personality & behaviour</span></label>
-        <textarea id="persona-prompt-input" rows="6" placeholder="You are Professor Oak, a friendly and knowledgeable Pokémon researcher. You speak with enthusiasm about Pokémon, nature, and science. You always encourage curiosity and exploration…"></textarea>
-        <div class="persona-prompt-tip">
-          💡 Be specific. Describe the persona's tone, expertise, speaking style, and any rules they follow.
-        </div>
-      </div>
-      <div id="persona-error" class="auth-error"></div>
-      <button id="persona-save-btn">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
-        Save & Activate Persona
-      </button>
-    </div>
-  </div>
-</div>
+  // Upstream returned audio directly: pass it through.
+  if (upstream.ok && upstreamType.startsWith('audio/')) {
+    return new Response(upstream.body, { status: 200, headers: { 'Content-Type': upstreamType, 'Cache-Control': 'no-store', ...cors } });
+  }
 
-<!-- ── DOWNLOAD / INSTALL MODAL ── -->
-<div id="download-overlay">
-  <div id="download-modal">
-    <div id="download-modal-header">
-      <div id="download-modal-title">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-        Download Nomis
-      </div>
-      <button id="download-modal-close">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-      </button>
-    </div>
-    <div id="download-modal-body">
-      <div id="download-app-card">
-        <img src="https://iili.io/qIqJ2F2.png" alt="Nomis" id="download-app-icon" />
-        <div id="download-app-info">
-          <div id="download-app-name" contenteditable="true" spellcheck="false">NOMIS</div>
-          <div id="download-app-maker" contenteditable="true" spellcheck="false">by NoteShelf</div>
-          <div id="download-app-tagline" contenteditable="true" spellcheck="false">Your intelligent companion — available everywhere.</div>
-        </div>
-      </div>
-      <div id="download-edit-hint">
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-        Click any text above to edit it
-      </div>
-      <div id="download-install-section">
-        <button id="pwa-install-btn" style="display:none;">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-          <span>Install Nomis App</span>
-        </button>
-        <div id="download-platforms">
-          <div class="platform-card">
-            <div class="platform-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></div>
-            <div class="platform-info">
-              <div class="platform-name">Desktop</div>
-              <div class="platform-steps" contenteditable="true" spellcheck="false">Click the install icon (⊕) in your browser's address bar, then click "Install".</div>
-            </div>
-          </div>
-          <div class="platform-card">
-            <div class="platform-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg></div>
-            <div class="platform-info">
-              <div class="platform-name">iPhone / iPad</div>
-              <div class="platform-steps" contenteditable="true" spellcheck="false">In Safari, tap the Share button → "Add to Home Screen" → "Add".</div>
-            </div>
-          </div>
-          <div class="platform-card">
-            <div class="platform-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z"/><path d="M8 12h8M12 8v8"/></svg></div>
-            <div class="platform-info">
-              <div class="platform-name">Android</div>
-              <div class="platform-steps" contenteditable="true" spellcheck="false">Tap the browser menu (⋮) → "Add to Home screen" → "Install".</div>
-            </div>
-          </div>
-        </div>
-        <div id="download-features">
-          <div class="download-feature"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg><span contenteditable="true" spellcheck="false">Works offline after first load</span></div>
-          <div class="download-feature"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg><span contenteditable="true" spellcheck="false">Native app experience — no browser chrome</span></div>
-          <div class="download-feature"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg><span contenteditable="true" spellcheck="false">Your conversations always saved locally</span></div>
-          <div class="download-feature"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg><span contenteditable="true" spellcheck="false">Free forever — no subscription required</span></div>
-        </div>
-      </div>
-    </div>
-  </div>
-</div>
+  const raw = await upstream.text();
+  let data = null;
+  try { data = JSON.parse(raw); } catch { /* non-JSON */ }
 
-<!-- ── PROFILE EDIT MODAL ── -->
-<div id="profile-overlay">
-  <div id="profile-modal">
-    <div id="profile-modal-header">
-      <div id="profile-modal-title">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-        Edit Profile
-      </div>
-      <button id="profile-modal-close">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-      </button>
-    </div>
-    <div id="profile-modal-body">
-      <div id="profile-avatar-section">
-        <div id="profile-avatar-ring">
-          <div id="profile-avatar-preview-wrap">
-            <div id="profile-avatar-display"></div>
-            <label id="profile-avatar-overlay" for="profile-avatar-input" title="Change photo">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-            </label>
-            <input type="file" id="profile-avatar-input" accept="image/*" style="display:none;" />
-          </div>
-        </div>
-        <div id="profile-avatar-hint">Click the photo to change</div>
-        <div id="profile-avatar-actions">
-          <button class="profile-avatar-btn" id="profile-avatar-remove">Remove Photo</button>
-        </div>
-      </div>
-      <div class="profile-field">
-        <label class="profile-label">Display Name</label>
-        <input type="text" id="profile-name-input" placeholder="Your name" maxlength="40" />
-      </div>
-      <div class="profile-field">
-        <label class="profile-label">Email <span class="profile-label-note">(read-only)</span></label>
-        <div class="profile-static-field" id="profile-email-display">—</div>
-      </div>
-      <div class="profile-field">
-        <label class="profile-label">Bio <span class="profile-label-note">optional</span></label>
-        <textarea id="profile-bio-input" placeholder="A little about yourself…" rows="3" maxlength="160"></textarea>
-        <div id="profile-bio-count">0 / 160</div>
-      </div>
-      <div class="profile-field">
-        <label class="profile-label">New Password <span class="profile-label-note">leave blank to keep current</span></label>
-        <input type="password" id="profile-password-input" placeholder="••••••••" autocomplete="new-password" />
-      </div>
-      <div id="profile-error"></div>
-      <button id="profile-save-btn">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
-        Save Changes
-      </button>
-    </div>
-  </div>
-</div>
+  if (!upstream.ok) {
+    const e = data?.error ?? data?.message ?? data?.detail;
+    const msg = typeof e === 'string' ? e : (e && typeof e.message === 'string' ? e.message : raw.replace(/\s+/g, ' ').slice(0, 200));
+    return json(upstream.status >= 400 && upstream.status < 600 ? upstream.status : 502, { error: msg || `FreeTTS HTTP ${upstream.status}` }, cors);
+  }
 
-<div id="toast"></div>
+  // Current known contract (from the original app.js): JSON { audio_url }. Fetch the file and return the bytes.
+  const audioUrl = data?.audio_url;
+  if (typeof audioUrl !== 'string') return json(502, { error: 'FreeTTS response had no audio_url' }, cors);
+  let parsed;
+  try { parsed = new URL(audioUrl); } catch { return json(502, { error: 'FreeTTS audio_url is not a valid URL' }, cors); }
+  if (parsed.protocol !== 'https:') return json(502, { error: 'FreeTTS audio_url is not https' }, cors);
 
-<template id="thinking-tpl">
-  <div class="msg-row assistant thinking-row">
-    <div class="msg-avatar">
-      <img src="https://iili.io/qIqJ2F2.png" alt="Nomis" />
-    </div>
-    <div class="msg-bubble assistant">
-      <div class="thinking-dots">
-        <span></span><span></span><span></span>
-      </div>
-    </div>
-  </div>
-</template>
+  let audioRes;
+  try { audioRes = await fetchImpl(parsed.href); } catch { return json(502, { error: 'could not download generated audio' }, cors); }
+  if (!audioRes.ok) return json(502, { error: `audio download failed (HTTP ${audioRes.status})` }, cors);
 
-<!-- ── MAINTENANCE SCREEN ── -->
-<div id="maintenance-screen" style="display:none;">
-  <div id="maintenance-orb"></div>
-  <div id="maintenance-content">
-    <img src="https://iili.io/qIqJ2F2.png" alt="Nomis" id="maintenance-logo" />
-    <h1 id="maintenance-title">Getting Better</h1>
-    <p id="maintenance-sub">Nomis is getting better, please hold for a moment.</p>
-    <div id="maintenance-dots"><span></span><span></span><span></span></div>
-  </div>
-</div>
+  const declared = Number.parseInt(audioRes.headers.get('Content-Length') || '', 10);
+  if (Number.isFinite(declared) && declared > MAX_AUDIO_BYTES) return json(502, { error: 'generated audio is too large' }, cors);
 
-<script type="module" src="app.js"></script>
-</body>
-</html>
+  const type = audioRes.headers.get('Content-Type');
+  return new Response(audioRes.body, {
+    status: 200,
+    headers: {
+      'Content-Type': type && type.startsWith('audio/') ? type : FORMATS[built.format],
+      'Cache-Control': 'no-store',
+      ...cors,
+    },
+  });
+}
+
+export default { fetch: (request, env) => handleRequest(request, env) };
