@@ -1,5 +1,5 @@
 /* Nomis AI — Service Worker */
-const CACHE = 'nomis-v1';
+const CACHE = 'nomis-v2';
 const ASSETS = [
   './',
   './index.html',
