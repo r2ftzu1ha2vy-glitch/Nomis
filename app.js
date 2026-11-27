@@ -2217,18 +2217,25 @@ if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
 let ttsSpeaking = false;
 let ttsCurrentBtn = null;
 
-/* ── FreeTTS (https://freetts.org) ──
-   Set FREETTS_API_KEY to your key. While it is '' the browser voice is used, so nothing breaks.
-   FREETTS_VOICE 'en-US-EricNeural' is DERIVED from the "Eric · English (United States) · Male"
-   label plus the 'en-US-JennyNeural' naming in the docs example. It is not confirmed by a
-   FreeTTS voice list; if the API rejects it, copy the exact voice id from their dashboard.
-   No 'style' is sent: which styles Eric supports is unknown. Max text length is unknown too. */
-const FREETTS_URL     = 'https://freetts.org/api/v1/tts';
-const FREETTS_API_KEY = 'ft_live_DhdKeTnrWGNAar1VJUbjCroEMmjIzYWy';                    // UNSET — paste your ft_live_... key
-const FREETTS_VOICE   = 'en-US-EricNeural';    // derived, see note above
+/* ── FreeTTS via your Cloudflare Worker proxy (see worker/DEPLOY.md) ──
+   The browser never talks to freetts.org and never holds the API key: freetts.org does not answer the
+   CORS preflight from a browser page, so the Worker makes the call server-side and returns audio bytes.
+   While FREETTS_PROXY_URL is '' the browser voice is used, so nothing breaks.
+   Voice: default en-US-EricNeural. Change it later with
+     localStorage.setItem('nomis_tts_voice', 'en-US-GuyNeural')   (remove the key to go back to default).
+   FREETTS_RATE / FREETTS_PITCH are null = not sent. The Worker forwards them upstream as plain numbers
+   under the field names RATE_FIELD / PITCH_FIELD; FreeTTS's real field names and units are UNVERIFIED. */
+const FREETTS_PROXY_URL = '';                  // UNSET — e.g. 'https://nomis-tts-proxy.<subdomain>.workers.dev'
+const FREETTS_DEFAULT_VOICE = 'en-US-EricNeural';
 const FREETTS_FORMAT  = 'mp3';                 // mp3 | mp3-hd | wav | ogg
+const FREETTS_RATE    = null;                  // number or null
+const FREETTS_PITCH   = null;                  // number or null
+function getTtsVoice() {
+  try { return localStorage.getItem('nomis_tts_voice') || FREETTS_DEFAULT_VOICE; } catch { return FREETTS_DEFAULT_VOICE; }
+}
 
 let ttsAudio = null;
+let ttsObjectUrl = null;  // blob URL of the current proxy audio, revoked on reset
 let ttsRequestId = 0;   // bumped on every stop/start so stale fetches and events are ignored
 
 function ttsReset() {
@@ -2240,6 +2247,7 @@ function ttsReset() {
     ttsAudio.load();
     ttsAudio = null;
   }
+  if (ttsObjectUrl) { URL.revokeObjectURL(ttsObjectUrl); ttsObjectUrl = null; }
   if ('speechSynthesis' in window) window.speechSynthesis.cancel();
   if (ttsCurrentBtn) { ttsCurrentBtn.innerHTML = ttsIconHTML(); ttsCurrentBtn.classList.remove('tts-active'); }
   ttsSpeaking = false; ttsCurrentBtn = null;
@@ -2342,33 +2350,38 @@ async function speakText(text, btn) {
   const fallback = (reason) => {
     if (id !== ttsRequestId) return;
     console.warn('[TTS] FreeTTS unavailable, using browser voice:', reason);
-    if (FREETTS_API_KEY) showToast('FreeTTS failed (' + reason + ') — using browser voice');
+    if (FREETTS_PROXY_URL) showToast('FreeTTS failed (' + reason + ') — using browser voice');
     const id2 = ttsBegin(btn);
     speakWithBrowser(clean, btn, id2);
   };
 
-  if (!FREETTS_API_KEY) { fallback('no API key set'); return; }
+  if (!FREETTS_PROXY_URL) { fallback('FREETTS_PROXY_URL not set'); return; }
 
   try {
-    const r = await fetch(FREETTS_URL, {
+    const payload = { text: clean, voice: getTtsVoice(), output_format: FREETTS_FORMAT };
+    if (FREETTS_RATE !== null) payload.rate = FREETTS_RATE;
+    if (FREETTS_PITCH !== null) payload.pitch = FREETTS_PITCH;
+    const r = await fetch(FREETTS_PROXY_URL, {
       method: 'POST',
-      headers: { 'x-api-key': FREETTS_API_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: clean, voice: FREETTS_VOICE, output_format: FREETTS_FORMAT }),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
     });
-    const raw = await r.text();
-    let data = null;
-    try { data = JSON.parse(raw); } catch { /* non-JSON body */ }
-    if (id !== ttsRequestId) return;                       // stopped or replaced while fetching
-    if (!r.ok) throw new Error(ttsErrorText(data, r.status, raw));
-    if (typeof data?.audio_url !== 'string' || !data.audio_url) {
-      console.error('[TTS] FreeTTS response had no audio_url:', raw.slice(0, 300));
-      throw new Error('response had no audio_url (keys: ' + Object.keys(data || {}).join(', ') + ')');
+    if (!r.ok) {
+      const raw = await r.text();
+      let data = null;
+      try { data = JSON.parse(raw); } catch { /* non-JSON body */ }
+      if (id !== ttsRequestId) return;
+      throw new Error(ttsErrorText(data, r.status, raw));
     }
+    const blob = await r.blob();
+    if (id !== ttsRequestId) return;                       // stopped or replaced while fetching
+    if (!blob.size || !(blob.type || '').startsWith('audio/')) throw new Error('proxy did not return audio (type: ' + (blob.type || 'none') + ')');
 
-    const audio = new Audio(data.audio_url);
+    ttsObjectUrl = URL.createObjectURL(blob);
+    const audio = new Audio(ttsObjectUrl);
     ttsAudio = audio;
     audio.onended = () => { if (id === ttsRequestId) ttsReset(); };
-    audio.onerror = () => { console.error('[TTS] Audio element error for', data.audio_url); fallback('audio could not be loaded'); };
+    audio.onerror = () => { console.error('[TTS] Audio element error'); fallback('audio could not be played'); };
     await audio.play();
   } catch (err) {
     if (id !== ttsRequestId) return;                       // pause() from a stop aborts play(): not an error
