@@ -319,18 +319,32 @@ const MODEL_FALLBACK_1_2_TO_1_4 = 'openai/gpt-4o'; // used only if Claude Sonnet
 // in your Rewind list), so no request is wasted on a paid-plan model that answers REQUIRES_PAID_PLAN.
 // Set to false to restore the per-version models in VERSION_MODEL_MAP / MODEL_VISION*.
 // Other free models are not listed here because their slugs are not in anything you have given me.
-const FREE_ONLY_MODE = true;
+const FREE_ONLY_MODE = true;   // if the free model is rate limited upstream, one retry goes to the version model (see isUpstreamRateLimit users)
+
+/** The model this chat WOULD use ignoring FREE_ONLY_MODE (per Nomis version / vision). */
+function getVersionModel(hasImage = false) {
+  if (hasImage) {
+    const isCreator = state?.user?.email === OWNER_EMAIL;
+    return isCreator ? MODEL_VISION_CREATOR : MODEL_VISION;
+  }
+  return VERSION_MODEL_MAP[state.nomisVersion] || VERSION_MODEL_MAP['1.4'];
+}
 
 function getActiveModel(hasImage = false) {
   if (FREE_ONLY_MODE) return MODEL_FREE_FALLBACK;
-  let picked;
-  if (hasImage) {
-    const isCreator = state?.user?.email === OWNER_EMAIL;
-    picked = isCreator ? MODEL_VISION_CREATOR : MODEL_VISION;
-  } else {
-    picked = VERSION_MODEL_MAP[state.nomisVersion] || VERSION_MODEL_MAP['1.4'];
-  }
+  const picked = getVersionModel(hasImage);
   return _planGatedModels.has(picked) ? MODEL_FREE_FALLBACK : picked;
+}
+
+/** Retry-after seconds from a 429 (null when the server does not expose the header to browsers). */
+function retryAfterMs(r) {
+  const v = Number.parseFloat(r.headers.get('retry-after'));
+  return Number.isFinite(v) && v > 0 ? Math.min(v * 1000, 12000) : null;
+}
+
+/** Provider-side rate limit on the model (not a key problem). Rotating keys cannot fix it. */
+function isUpstreamRateLimit(info) {
+  return /upstream_rate_limited/i.test(`${info.code} ${info.message}`) || /provider returned error/i.test(info.message || '');
 }
 
 const APP_URL = window.location.href;
@@ -2664,8 +2678,10 @@ async function streamCompletion({ messages, targetBubble, hasImage = false, onDo
   // This is separate from isOutOfCreditsError rotation below, which
   // handles genuinely dead/exhausted keys (401/402/403) and correctly
   // stops once every key has been tried once.
-  const RATE_LIMIT_DEADLINE_MS = 15000;
+  const RATE_LIMIT_DEADLINE_MS = 40000;
   let rateLimitDeadline = null;
+  let triedAltModel = false;
+  let rlWaits = 0;
 
   for (let attempt = 0; ; attempt++) {
     const key = getActiveKey();
@@ -2704,15 +2720,29 @@ async function streamCompletion({ messages, targetBubble, hasImage = false, onDo
         continue;
       }
 
-      // Any other 429 is a rate limit: rotate key-to-key (wrapping) with a short delay until the deadline.
+      // Any other 429 is a rate limit. A provider-side limit on the free model is not fixed by another key:
+      // first try the version model once, then wait for retry-after (or a growing backoff) until the deadline.
       if (r.status === 429) {
+        if (isUpstreamRateLimit(info) && model === MODEL_FREE_FALLBACK && !triedAltModel) {
+          const alt = getVersionModel(hasImage);
+          triedAltModel = true;
+          if (alt !== MODEL_FREE_FALLBACK && !_planGatedModels.has(alt)) {
+            console.warn(`[Model] ${MODEL_FREE_FALLBACK} is rate limited upstream. Trying ${alt}.`);
+            showToast('Free model is busy — trying another model');
+            model = alt;
+            continue;
+          }
+        }
         if (rateLimitDeadline === null) rateLimitDeadline = Date.now() + RATE_LIMIT_DEADLINE_MS;
         if (Date.now() >= rateLimitDeadline) {
           throw new Error('Server Currently Unavailable');
         }
-        _activeKeyIndex = (_activeKeyIndex + 1) % REWIND_API_KEYS.length;
-        console.warn(`[KeyPool/Stream] 429 rate-limited. Rotated to key index ${_activeKeyIndex}…`);
-        await sleep(750);
+        if (!isUpstreamRateLimit(info)) _activeKeyIndex = (_activeKeyIndex + 1) % REWIND_API_KEYS.length;
+        rlWaits++;
+        const waitMs = retryAfterMs(r) ?? Math.min(1500 * rlWaits, 6000);
+        console.warn(`[KeyPool/Stream] 429 rate-limited. Waiting ${waitMs} ms (retry ${rlWaits})…`);
+        if (rlWaits === 1) showToast('Model is busy — retrying…');
+        await sleep(waitMs);
         continue;
       }
 
@@ -2950,7 +2980,9 @@ async function retryLastMessage(row, bubble) {
 
     let response = null;
     let rateLimitDeadline = null;
-    const RATE_LIMIT_DEADLINE_MS = 15000;
+    const RATE_LIMIT_DEADLINE_MS = 40000;
+    let triedAltModel = false;
+    let rlWaits = 0;
     const trimmedMessages = trimMessagesForApi(messages);
     for (let attempt = 0; ; attempt++) {
       const key = getActiveKey();
@@ -2981,14 +3013,29 @@ async function retryLastMessage(row, bubble) {
         continue;
       }
 
-      // Any other 429 is a rate limit: rotate key-to-key (wrapping) with a short delay until the deadline.
+      // Any other 429 is a rate limit. A provider-side limit on the free model is not fixed by another key:
+      // first try the version model once, then wait for retry-after (or a growing backoff) until the deadline.
       if (r.status === 429) {
+        if (isUpstreamRateLimit(info) && model === MODEL_FREE_FALLBACK && !triedAltModel) {
+          const alt = getVersionModel(false);
+          triedAltModel = true;
+          if (alt !== MODEL_FREE_FALLBACK && !_planGatedModels.has(alt)) {
+            console.warn(`[Model] ${MODEL_FREE_FALLBACK} is rate limited upstream. Trying ${alt}.`);
+            showToast('Free model is busy — trying another model');
+            model = alt;
+            continue;
+          }
+        }
         if (rateLimitDeadline === null) rateLimitDeadline = Date.now() + RATE_LIMIT_DEADLINE_MS;
         if (Date.now() >= rateLimitDeadline) {
           throw new Error('Server Currently Unavailable');
         }
-        _activeKeyIndex = (_activeKeyIndex + 1) % REWIND_API_KEYS.length;
-        await sleep(750);
+        if (!isUpstreamRateLimit(info)) _activeKeyIndex = (_activeKeyIndex + 1) % REWIND_API_KEYS.length;
+        rlWaits++;
+        const waitMs = retryAfterMs(r) ?? Math.min(1500 * rlWaits, 6000);
+        console.warn(`[KeyPool/Retry] 429 rate-limited. Waiting ${waitMs} ms (retry ${rlWaits})…`);
+        if (rlWaits === 1) showToast('Model is busy — retrying…');
+        await sleep(waitMs);
         continue;
       }
 
